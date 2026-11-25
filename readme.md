@@ -1,3 +1,6 @@
+   ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+   ![License](https://img.shields.io/badge/License-MIT-green.svg)
+
 # clusteringV3
 
 Инструмент для анализа поисковых запросов с помощью графовых алгоритмов и ИИ.
@@ -21,7 +24,7 @@
 ```bash
 git clone https://github.com/kopyrin/clusteringV3.git
 cd clusteringV3
-python launcher.py
+python launcher_V2.py
 ```
 
 Лаунчер автоматически создаст виртуальное окружение и установит зависимости.
@@ -62,4 +65,4 @@ clusteringV3/
 ```
 ## Лицензия
 
-МИТ
+MIT License

@@ -15,20 +15,24 @@ from pathlib import Path
 import sqlite3
 import yaml
 
-# ============================================================
-# ПУТИ
-# ============================================================
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_FILE = PROJECT_ROOT / "config" / "core_builder.yaml"
-DB_FILE = PROJECT_ROOT / "data" / "output" / "semantics.db"
-START_WORDS_FILE = PROJECT_ROOT / "data" / "input" / "start_words.txt"
-OUTPUT_FILE = PROJECT_ROOT / "data" / "output" / "core_words.csv"
-CHECKPOINT_FILE = PROJECT_ROOT / "data" / "output" / "core_words_checkpoint.json"
+from common import (
+    ROOT,
+    CORE_CONFIG_FILE,
+    DB_FILE,
+    START_WORDS_FILE,
+    CORE_OUTPUT_CSV,
+    CORE_CHECKPOINT,
+    REQUIRED_INDEXES,
+    ensure_indexes,
+    apply_pragmas,
+    get_pattern_marks,
+)
 
 
 # ============================================================
 # АРГУМЕНТЫ
 # ============================================================
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Построение семантического ядра")
     parser.add_argument("--timing", action="store_true",
@@ -46,181 +50,34 @@ ARGS = parse_args()
 # ============================================================
 # КОНФИГ
 # ============================================================
+
 def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, encoding="utf-8") as f:
+    if CORE_CONFIG_FILE.exists():
+        with open(CORE_CONFIG_FILE, encoding="utf-8") as f:
             config = yaml.safe_load(f)
-        return config
-    else:
-        return {}
-
-
-# ============================================================
-# ИНДЕКСЫ
-# ============================================================
-REQUIRED_INDEXES = [
-    ("idx_words_word", "words", "word"),
-    ("idx_links_word1", "links", "word1_id"),
-    ("idx_links_word2", "links", "word2_id"),
-    ("idx_links_word1_word2", "links", "word1_id, word2_id"),
-    ("idx_group_words_word_id", "group_words", "word_id"),
-    ("idx_group_words_group_id", "group_words", "group_id"),
-    ("idx_groups_name", "groups", "name"),
-]
-
-
-def ensure_indexes(conn: sqlite3.Connection, verbose: bool = True) -> dict:
-    cur = conn.cursor()
-    stats = {"existing": [], "created": [], "errors": [], "skipped_tables": set()}
-
-    existing_by_table = {}
-    for table in ("words", "links", "group_words", "groups"):
-        try:
-            rows = cur.execute(f"PRAGMA index_list({table})").fetchall()
-        except sqlite3.OperationalError as e:
-            if verbose:
-                print(f"  ⚠️  Таблица {table} не найдена: {e}")
-            stats["skipped_tables"].add(table)
-            continue
-        indexes = {}
-        for row in rows:
-            idx_name = row[1]
-            cols = cur.execute(f"PRAGMA index_info({idx_name})").fetchall()
-            col_names = tuple(c[2] for c in cols)
-            indexes[idx_name] = col_names
-        existing_by_table[table] = indexes
-
-    for idx_name, table, columns_expr in REQUIRED_INDEXES:
-        if table in stats["skipped_tables"]:
-            continue
-        cols_tuple = tuple(c.strip() for c in columns_expr.split(","))
-        indexes = existing_by_table.get(table, {})
-
-        found = False
-        for existing_name, existing_cols in indexes.items():
-            if existing_cols == cols_tuple:
-                stats["existing"].append((idx_name, table, columns_expr, existing_name))
-                found = True
-                break
-
-        if not found:
-            sql = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({columns_expr})"
-            try:
-                if verbose:
-                    print(f"  🔧 Создаю индекс: {idx_name} ON {table}({columns_expr}) ...", end=" ", flush=True)
-                t0 = time.perf_counter()
-                cur.execute(sql)
-                conn.commit()
-                elapsed = time.perf_counter() - t0
-                if verbose:
-                    print(f"OK ({elapsed:.2f}с)")
-                stats["created"].append((idx_name, table, columns_expr, elapsed))
-            except sqlite3.OperationalError as e:
-                if verbose:
-                    print(f"ОШИБКА: {e}")
-                stats["errors"].append((idx_name, table, columns_expr, str(e)))
-
-    return stats
-
-
-def apply_pragmas(conn: sqlite3.Connection):
-    cur = conn.cursor()
-    try:
-        cur.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("PRAGMA cache_size=-10000")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("PRAGMA temp_store=MEMORY")
-    except sqlite3.OperationalError:
-        pass
-
-
-# ============================================================
-# ВЫВОД ПАРАМЕТРОВ
-# ============================================================
-def print_parameters(config: dict):
-    cb = config.get("core_builder", {})
-
-    print("\n" + "=" * 70)
-    print("📋 ПАРАМЕТРЫ АЛГОРИТМА (config/core_builder.yaml)")
-    print("=" * 70)
-
-    print("\n🎯 ОСНОВНЫЕ ПАРАМЕТРЫ ВЫБОРКИ:")
-    print(f"  • max_core_size    = {cb.get('max_core_size', 200)}")
-    print(f"    Макс. количество слов в ядре для каждого стартового слова")
-    print(f"  • min_connections  = {cb.get('min_connections', 1)}")
-    print(f"    Мин. связей кандидата со словами ядра (отсекает случайные)")
-    print(f"  • max_connections  = {cb.get('max_connections', 'не задан')}")
-    print(f"    Макс. связей (фильтр от слишком общих слов)")
-    print(f"  • min_link_weight  = {cb.get('min_link_weight', 0)}")
-    print(f"    Мин. вес связи (сила ассоциации между словами)")
-
-    print("\n📊 ФИЛЬТРЫ ЧАСТОТНОСТИ:")
-    print(f"  • min_word_freq    = {cb.get('min_word_freq', 0)}")
-    print(f"    Мин. частота слова в корпусе (отсекает редкие)")
-    print(f"  • max_word_freq    = {cb.get('max_word_freq', 'не задан')}")
-    print(f"    Макс. частота слова (отсекает слишком общие)")
-
-    print("\n💾 ЧЕКПОИНТЫ:")
-    ckpt = cb.get("checkpoint", {})
-    print(f"  • checkpoint.enabled  = {ckpt.get('enabled', False)}")
-    print(f"    Сохранять промежуточные результаты в core_words_checkpoint.json")
-    print(f"  • checkpoint.interval = {ckpt.get('interval', 10)}")
-    print(f"    Сохранять каждые N итераций")
-
-    print("\n📁 ВЫВОД РЕЗУЛЬТАТОВ:")
-    out = cb.get("output", {})
-    print(f"  • output.format     = {out.get('format', 'csv')}")
-    print(f"    Формат файла: csv, txt или both")
-    print(f"  • output.include_all = {out.get('include_all', True)}")
-    print(f"    Включать отсеянных кандидатов (с причинами отсева)")
-    print(f"  • output.show_marks  = {out.get('show_marks', True)}")
-    print(f"    Показывать колонку с метками (dict, group)")
-
-    print("\n🏷️  МЕТКИ СЛОВ (пометки в выводе, не исключения):")
-    md = cb.get("mark_dicts", {})
-    mg = cb.get("mark_groups", {})
-    print(f"  • mark_dicts.enabled  = {md.get('enabled', True)}")
-    print(f"    Загружать слова из dict/*.txt для пометки")
-    print(f"  • mark_dicts.use_all  = {md.get('use_all', True)}")
-    print(f"    Использовать все файлы из dict/ или только указанные")
-    print(f"  • mark_dicts.files    = {md.get('files', [])}")
-    print(f"    Список файлов (если use_all=false)")
-    print(f"  • mark_groups.enabled = {mg.get('enabled', True)}")
-    print(f"    Загружать слова из групп БД для пометки")
-    groups_list = list(mg.get("groups", {}).keys())
-    print(f"  • mark_groups.groups  = {groups_list if len(groups_list) <= 5 else groups_list[:5] + ['...']}")
-
-    print("\n💡 КАК РАБОТАЕТ АЛГОРИТМ:")
-    print("  1. Берём стартовое слово из start_words.txt")
-    print("  2. Находим всех его соседей в графе (связанные слова)")
-    print("  3. Для каждого кандидата: score = сумма_связей / частота_слова")
-    print("  4. Применяем фильтры (min/max connections, min/max freq)")
-    print("  5. Выбираем кандидата с максимальным score")
-    print("  6. Добавляем в ядро, повторяем до max_core_size")
-    print("  7. Переходим к следующему стартовому слову")
-    print("=" * 70)
+            return config if config else {}
+    return {}
 
 
 # ============================================================
 # ЗАГРУЗКА МЕТОК
 # ============================================================
+
 def load_marked_words_from_dicts(config: dict) -> set:
     cfg = config.get("core_builder", {}).get("mark_dicts", {})
     if not cfg.get("enabled", True):
         return set()
+
     words = set()
-    dict_dir = PROJECT_ROOT / "dict"
+    dict_dir = ROOT / "dict"
     if not dict_dir.exists():
         return words
+
     if cfg.get("use_all", True):
         files = sorted(dict_dir.glob("*.txt"))
     else:
         files = [dict_dir / f for f in cfg.get("files", []) if (dict_dir / f).exists()]
+
     for path in files:
         try:
             with open(path, encoding="utf-8") as f:
@@ -238,6 +95,7 @@ def load_marked_groups_from_db(graph, config: dict) -> set:
     cfg = cb.get("mark_groups")
     if cfg is None or not cfg.get("enabled", True):
         return set()
+
     groups_cfg = cfg.get("groups", {})
     marked_groups = []
     for key, value in groups_cfg.items():
@@ -248,9 +106,11 @@ def load_marked_groups_from_db(graph, config: dict) -> set:
             for group_name, enabled in value.items():
                 if enabled:
                     marked_groups.append(group_name)
+
     if not marked_groups:
         return set()
-    placeholders = ",".join("?" * len(marked_groups))
+
+    placeholders = ", ".join("?" * len(marked_groups))
     rows = graph.cur.execute(
         f"""
         SELECT DISTINCT gw.word_id
@@ -263,22 +123,10 @@ def load_marked_groups_from_db(graph, config: dict) -> set:
     return {row["word_id"] for row in rows}
 
 
-def get_pattern_marks(word: str) -> list[str]:
-    marks = []
-    if any(c.isdigit() for c in word):
-        marks.append("цифры")
-    if len(word) < 3:
-        marks.append("короткое")
-    if word.isascii() and word.isalpha():
-        marks.append("латиница")
-    if 2 <= len(word) <= 5 and word.isalpha():
-        marks.append("аббр")
-    return marks
-
-
 # ============================================================
 # КЛАСС Graph (ОПТИМИЗИРОВАННЫЙ)
 # ============================================================
+
 class Graph:
     def __init__(self, db_path: Path):
         self.conn = sqlite3.connect(db_path)
@@ -340,7 +188,6 @@ class Graph:
                 self._groups_cache[row["word_id"]] = []
             self._groups_cache[row["word_id"]].append(row["name"])
         print(f"  ✅ Загружено {len(self._groups_cache):,} слов с группами ({time.perf_counter() - t2:.2f}с)")
-
         print(f"📥 Предзагрузка завершена за {time.perf_counter() - t0:.2f}с\n")
 
     def get_word_pos(self, word_id: int):
@@ -358,9 +205,10 @@ class Graph:
     def get_total_links_for_word(self, word_id: int) -> int:
         return self._total_links_cache.get(word_id, 0)
 
-    def get_neighbors(self, word_id: int) -> dict[int, int]:
+    def get_neighbors(self, word_id: int) -> dict:
         if word_id in self._neighbors_cache:
             return self._neighbors_cache[word_id]
+
         rows1 = self.cur.execute(
             "SELECT word2_id, count FROM links WHERE word1_id = ? ORDER BY count DESC LIMIT 2000",
             (word_id,),
@@ -369,6 +217,7 @@ class Graph:
             "SELECT word1_id, count FROM links WHERE word2_id = ? ORDER BY count DESC LIMIT 2000",
             (word_id,),
         ).fetchall()
+
         result = {}
         for row in rows1:
             result[row[0]] = row[1]
@@ -377,11 +226,12 @@ class Graph:
                 result[row[0]] = row[1]
             else:
                 result[row[0]] = max(result[row[0]], row[1])
+
         result = dict(sorted(result.items(), key=lambda item: item[1], reverse=True))
         self._neighbors_cache[word_id] = result
         return result
 
-    def get_word_groups(self, word_id: int) -> list[str]:
+    def get_word_groups(self, word_id: int) -> list:
         return self._groups_cache.get(word_id, [])
 
     def close(self):
@@ -391,6 +241,7 @@ class Graph:
 # ============================================================
 # КЛАСС CoreBuilder (ОПТИМИЗИРОВАННЫЙ)
 # ============================================================
+
 class CoreBuilder:
     def __init__(
             self,
@@ -407,10 +258,12 @@ class CoreBuilder:
         self.marked_words = marked_words
         self.marked_group_ids = marked_group_ids
         self.candidates_marks = {}
+
         self.start_word = start_word
         self.start_id = graph.get_word_id(start_word)
         if self.start_id is None:
             raise ValueError(f'Слово "{start_word}" не найдено.')
+
         self.min_connections = self.config.get("min_connections", 1)
         self.max_core_size = self.config.get("max_core_size", 200)
         self.collect_all = self.config.get("collect_all", True)
@@ -421,6 +274,7 @@ class CoreBuilder:
         self.core_set = {self.start_id}
         self.candidates = {}
         self.statistics = []
+
         self._core_metadata = {}
         self._core_metadata[self.start_id] = {
             "word": self.graph.get_word(self.start_id),
@@ -428,6 +282,7 @@ class CoreBuilder:
             "count": self.graph.get_word_count(self.start_id),
             "groups": self.graph.get_word_groups(self.start_id),
         }
+
         self.all_candidates_log = {}
         self.reject_stats = {
             "min_connections": 0,
@@ -435,6 +290,7 @@ class CoreBuilder:
             "min_word_freq": 0,
             "max_word_freq": 0,
         }
+
         self._last_added_word = None
         self._start_time = time.perf_counter()
         self._timing = {
@@ -523,6 +379,7 @@ class CoreBuilder:
     def load_candidates(self):
         self.candidates = {}
         min_link_weight = self.config.get("min_link_weight", 0)
+
         for core_id in self.core:
             neighbors = self.graph.get_neighbors(core_id)
             for neighbor_id, weight in neighbors.items():
@@ -530,25 +387,30 @@ class CoreBuilder:
                     continue
                 if weight < min_link_weight:
                     continue
+
                 word = self.graph.get_word(neighbor_id)
                 marks = []
                 if word in self.marked_words:
                     marks.append("dict")
                 if neighbor_id in self.marked_group_ids:
                     marks.append("group")
+
                 if neighbor_id not in self.candidates:
                     self.candidates[neighbor_id] = {}
                     self.candidates_marks[neighbor_id] = marks
+
                 self.candidates[neighbor_id][core_id] = weight
 
     def calculate_statistics(self):
         self.statistics = []
         cfg = self.config
+
         for candidate_id, links in self.candidates.items():
-            weights = list(links.values())  # УБРАЛИ sorted()
+            weights = list(links.values())
             connections = len(weights)
             min_conn = cfg.get("min_connections", 1)
             max_conn = cfg.get("max_connections")
+
             if connections < min_conn:
                 self.reject_stats["min_connections"] += 1
                 word = self.graph.get_word(candidate_id)
@@ -558,6 +420,7 @@ class CoreBuilder:
                     "status": "rejected", "reason": "min_connections",
                 }
                 continue
+
             if max_conn is not None and connections > max_conn:
                 self.reject_stats["max_connections"] += 1
                 word = self.graph.get_word(candidate_id)
@@ -567,9 +430,11 @@ class CoreBuilder:
                     "status": "rejected", "reason": "max_connections",
                 }
                 continue
+
             word_count = self.graph.get_word_count(candidate_id)
             min_freq = cfg.get("min_word_freq", 0)
             max_freq = cfg.get("max_word_freq")
+
             if word_count < min_freq:
                 self.reject_stats["min_word_freq"] += 1
                 word = self.graph.get_word(candidate_id)
@@ -579,6 +444,7 @@ class CoreBuilder:
                     "status": "rejected", "reason": "min_word_freq",
                 }
                 continue
+
             if max_freq is not None and word_count > max_freq:
                 self.reject_stats["max_word_freq"] += 1
                 word = self.graph.get_word(candidate_id)
@@ -588,9 +454,10 @@ class CoreBuilder:
                     "status": "rejected", "reason": "max_word_freq",
                 }
                 continue
-            # УБРАЛИ sorted() — используем max() и sum() напрямую
+
             total = sum(weights) - max(weights)
             score = total / word_count if word_count > 0 else 0
+
             self.statistics.append({
                 "id": candidate_id,
                 "connections": connections,
@@ -602,6 +469,7 @@ class CoreBuilder:
                 "max": max(weights),
                 "total_links": self.graph.get_total_links_for_word(candidate_id),
             })
+
         self.statistics.sort(key=lambda x: x["score"], reverse=True)
 
     def choose_best(self):
@@ -621,12 +489,15 @@ class CoreBuilder:
             return
         self.core.append(word_id)
         self.core_set.add(word_id)
+
         word = self.graph.get_word(word_id)
         pos = self.graph.get_word_pos(word_id)
         count = self.graph.get_word_count(word_id)
         groups = self.graph.get_word_groups(word_id)
+
         if not groups:
             groups = get_pattern_marks(word)
+
         self._core_metadata[word_id] = {
             "word": word, "pos": pos, "count": count, "groups": groups,
         }
@@ -638,8 +509,8 @@ class CoreBuilder:
     def save_checkpoint(self):
         import json
         words = self.core_words()
-        CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+        CORE_CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
+        with open(CORE_CHECKPOINT, "w", encoding="utf-8") as f:
             json.dump(words, f, ensure_ascii=False, indent=2)
 
     def print_timing_summary(self):
@@ -657,20 +528,23 @@ class CoreBuilder:
 # ============================================================
 # ВЫВОД РЕЗУЛЬТАТОВ
 # ============================================================
-def save_results(config: dict, builders: list[CoreBuilder]):
+
+def save_results(config: dict, builders: list):
     cfg = config.get("core_builder", {}).get("output", {})
     fmt = cfg.get("format", "csv")
     include_all = cfg.get("include_all", True)
     show_marks = cfg.get("show_marks", True)
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    CORE_OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt in ("csv", "both"):
-        with open(OUTPUT_FILE, "w", encoding="utf-8", newline="") as f:
+        with open(CORE_OUTPUT_CSV, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             header = ["слово", "частота", "часть речи", "группы"]
             if show_marks:
                 header.append("метки")
             writer.writerow(header)
+
             for builder in builders:
                 all_words = []
                 for word_id in builder.core:
@@ -689,6 +563,7 @@ def save_results(config: dict, builders: list[CoreBuilder]):
                         "word": word, "weight": weight, "pos": pos,
                         "groups": groups_str, "marks": marks_str,
                     })
+
                 if include_all:
                     for word_id, log in builder.all_candidates_log.items():
                         word = log["word"]
@@ -705,10 +580,12 @@ def save_results(config: dict, builders: list[CoreBuilder]):
                             "word": word, "weight": weight, "pos": pos,
                             "groups": groups_str, "marks": marks_str,
                         })
+
                 no_marks = [w for w in all_words if not w["marks"]]
                 with_marks = [w for w in all_words if w["marks"]]
                 no_marks.sort(key=lambda x: x["weight"], reverse=True)
                 with_marks.sort(key=lambda x: x["weight"], reverse=True)
+
                 for row in no_marks + with_marks:
                     csv_row = [row["word"], row["weight"], row["pos"], row["groups"]]
                     if show_marks:
@@ -716,7 +593,7 @@ def save_results(config: dict, builders: list[CoreBuilder]):
                     writer.writerow(csv_row)
 
     if fmt in ("txt", "both"):
-        txt_file = OUTPUT_FILE.with_suffix(".txt")
+        txt_file = CORE_OUTPUT_CSV.with_suffix(".txt")
         with open(txt_file, "w", encoding="utf-8") as f:
             for builder in builders:
                 core_rows = []
@@ -733,6 +610,64 @@ def save_results(config: dict, builders: list[CoreBuilder]):
 # ============================================================
 # ТОЧКА ВХОДА
 # ============================================================
+
+def print_parameters(config: dict):
+    cb = config.get("core_builder", {})
+    print("\n" + "=" * 70)
+    print("📋 ПАРАМЕТРЫ АЛГОРИТМА (config/core_builder.yaml)")
+    print("=" * 70)
+    print("\n🎯 ОСНОВНЫЕ ПАРАМЕТРЫ ВЫБОРКИ:")
+    print(f"  • max_core_size    = {cb.get('max_core_size', 200)}")
+    print(f"    Макс. количество слов в ядре для каждого стартового слова")
+    print(f"  • min_connections  = {cb.get('min_connections', 1)}")
+    print(f"    Мин. связей кандидата со словами ядра (отсекает случайные)")
+    print(f"  • max_connections  = {cb.get('max_connections', 'не задан')}")
+    print(f"    Макс. связей (фильтр от слишком общих слов)")
+    print(f"  • min_link_weight  = {cb.get('min_link_weight', 0)}")
+    print(f"    Мин. вес связи (сила ассоциации между словами)")
+    print("\n📊 ФИЛЬТРЫ ЧАСТОТНОСТИ:")
+    print(f"  • min_word_freq    = {cb.get('min_word_freq', 0)}")
+    print(f"    Мин. частота слова в корпусе (отсекает редкие)")
+    print(f"  • max_word_freq    = {cb.get('max_word_freq', 'не задан')}")
+    print(f"    Макс. частота слова (отсекает слишком общие)")
+    print("\n💾 ЧЕКПОИНТЫ:")
+    ckpt = cb.get("checkpoint", {})
+    print(f"  • checkpoint.enabled  = {ckpt.get('enabled', False)}")
+    print(f"    Сохранять промежуточные результаты в core_words_checkpoint.json")
+    print(f"  • checkpoint.interval = {ckpt.get('interval', 10)}")
+    print(f"    Сохранять каждые N итераций")
+    print("\n📁 ВЫВОД РЕЗУЛЬТАТОВ:")
+    out = cb.get("output", {})
+    print(f"  • output.format     = {out.get('format', 'csv')}")
+    print(f"    Формат файла: csv, txt или both")
+    print(f"  • output.include_all = {out.get('include_all', True)}")
+    print(f"    Включать отсеянных кандидатов (с причинами отсева)")
+    print(f"  • output.show_marks  = {out.get('show_marks', True)}")
+    print(f"    Показывать колонку с метками (dict, group)")
+    print("\n🏷️  МЕТКИ СЛОВ (пометки в выводе, не исключения):")
+    md = cb.get("mark_dicts", {})
+    mg = cb.get("mark_groups", {})
+    print(f"  • mark_dicts.enabled  = {md.get('enabled', True)}")
+    print(f"    Загружать слова из dict/*.txt для пометки")
+    print(f"  • mark_dicts.use_all  = {md.get('use_all', True)}")
+    print(f"    Использовать все файлы из dict/ или только указанные")
+    print(f"  • mark_dicts.files    = {md.get('files', [])}")
+    print(f"    Список файлов (если use_all=false)")
+    print(f"  • mark_groups.enabled = {mg.get('enabled', True)}")
+    print(f"    Загружать слова из групп БД для пометки")
+    groups_list = list(mg.get("groups", {}).keys())
+    print(f"  • mark_groups.groups  = {groups_list if len(groups_list) <= 5 else groups_list[:5] + ['...']}")
+    print("\n💡 КАК РАБОТАЕТ АЛГОРИТМ:")
+    print("  1. Берём стартовое слово из start_words.txt")
+    print("  2. Находим всех его соседей в графе (связанные слова)")
+    print("  3. Для каждого кандидата: score = сумма_связей / частота_слова")
+    print("  4. Применяем фильтры (min/max connections, min/max freq)")
+    print("  5. Выбираем кандидата с максимальным score")
+    print("  6. Добавляем в ядро, повторяем до max_core_size")
+    print("  7. Переходим к следующему стартовому слову")
+    print("=" * 70)
+
+
 def run():
     if not DB_FILE.exists():
         print(f"❌ БД не найдена: {DB_FILE}")
@@ -804,7 +739,7 @@ def run():
         save_results(config, builders)
         total_words = sum(b.size for b in builders)
         print(f"\n✅ Готово. Слов в ядрах: {total_words:,} | Время: {total_elapsed:.1f}с")
-        print(f"   Результат: {OUTPUT_FILE.relative_to(PROJECT_ROOT)}")
+        print(f"   Результат: {CORE_OUTPUT_CSV.relative_to(ROOT)}")
 
     graph.close()
 
@@ -839,7 +774,6 @@ def main():
             stats.sort_stats("cumulative")
             stats.print_stats(30)
             print(stream.getvalue())
-
             print("=" * 70)
             print("📊 ТОП-30 по собственному времени")
             print("=" * 70)

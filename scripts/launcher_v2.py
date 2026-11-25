@@ -1,102 +1,43 @@
 """
-Semantic Facet Analyzer — Лаунчер проекта
+scripts/launcher_v2.py — точка входа проекта Semantic Facet Analyzer.
 Полное управление сборкой семантического ядра: все параметры и этапы.
+
+Использует общую библиотеку scripts/common.py (пути, UI-хелперы, YAML,
+консольные функции, Field, UNCHANGED, prompt_*).
+
+Запуск: python scripts/launcher_v2.py
 """
-import os
-import sys
-import json
 import copy
+import json
+import os
 import sqlite3
 import subprocess
-from dataclasses import dataclass, field as dc_field
+import sys
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
-
-# ============================================================
-# 1. UI-ХЕЛПЕРЫ
-# ============================================================
-def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-
-def pause():
-    input("\n  Нажмите Enter...")
-
-
-def error(msg: str):
-    print(f"\n  [!] {msg}")
-
-
-def success(msg: str):
-    print(f"  [ok] {msg}")
-
-
-def screen(title: str):
-    """Контекстный менеджер для оформления экрана."""
-    class _Screen:
-        def __enter__(self):
-            clear_screen()
-            print("\n" + "=" * 70)
-            print(f"  {title}")
-            print("=" * 70)
-            return self
-        def __exit__(self, *args):
-            pass
-    return _Screen()
-
-
-def confirm(prompt: str = "Подтверждаете?") -> bool:
-    raw = input(f"\n  {prompt} (да/нет): ").strip().lower()
-    return raw in ("да", "д", "y", "yes")
-
-
-def fmt_val(v: Any) -> str:
-    if v is None:
-        return "не задан"
-    if isinstance(v, bool):
-        return "вкл" if v else "выкл"
-    return str(v)
-
-
-UNCHANGED = object()
+from common import (
+    ROOT,
+    VENV_DIR, VENV_PYTHON, REQUIREMENTS,
+    CONFIG_DIR, CORE_CONFIG_FILE,
+    DB_FILE, START_WORDS_FILE, DICT_DIR, SEED_DIR,
+    CORE_OUTPUT_CSV, CORE_OUTPUT_TXT, CORE_CHECKPOINT,
+    # UI-хелперы
+    clear_screen, pause, error, success, screen, confirm, fmt_val,
+    UNCHANGED,
+    prompt_int, prompt_bool, prompt_choice,
+    Field,
+    # YAML
+    load_yaml, save_yaml, _deep_merge,
+)
 
 
 # ============================================================
-# 2. ПУТИ ПРОЕКТА
+# VENV И ЗАПУСК СКРИПТОВ
 # ============================================================
-def find_root() -> Path:
-    current = Path(__file__).resolve()
-    for parent in [current.parent] + list(current.parents):
-        if (parent / "data").exists() or (parent / "requirements.txt").exists():
-            return parent
-    return current.parent.parent
 
-
-ROOT = find_root()
-VENV_DIR = ROOT / ".venv"
-VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-REQUIREMENTS = ROOT / "requirements.txt"
-CONFIG_DIR = ROOT / "config"
-CORE_CONFIG_FILE = CONFIG_DIR / "core_builder.yaml"
-DB_FILE = ROOT / "data" / "output" / "semantics.db"
-START_WORDS_FILE = ROOT / "data" / "input" / "start_words.txt"
-DICT_DIR = ROOT / "dict"
-SEED_DIR = ROOT / "data" / "seed"
-CORE_OUTPUT_CSV = ROOT / "data" / "output" / "core_words.csv"
-CORE_OUTPUT_TXT = ROOT / "data" / "output" / "core_words.txt"
-CORE_CHECKPOINT = ROOT / "data" / "output" / "core_words_checkpoint.json"
-
-
-# ============================================================
-# 3. VENV И ЗАПУСК СКРИПТОВ
-# ============================================================
 def run_script(module_name: str, args: list = None) -> bool:
+    """Запускает скрипт из scripts/ через .venv/python."""
     script = ROOT / "scripts" / module_name
     if not script.exists():
         error(f"скрипт не найден: scripts/{module_name}")
@@ -142,32 +83,29 @@ def ensure_venv():
 
 
 # ============================================================
-# 4. ПРОВЕРКИ ГОТОВНОСТИ
+# ПРОВЕРКИ ГОТОВНОСТИ
 # ============================================================
+
 def check_status() -> dict:
     kw = ROOT / "data" / "input" / "keywords.txt"
     env = ROOT / ".env"
-
     has_seed_csv = any(SEED_DIR.glob("*.csv")) if SEED_DIR.exists() else False
     has_seed_parts = any(SEED_DIR.glob("*.part*")) if SEED_DIR.exists() else False
     has_seed_gz = any(SEED_DIR.glob("*.csv.gz")) if SEED_DIR.exists() else False
-
     db_has_data = False
     if DB_FILE.exists():
         try:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(str(DB_FILE))
             count = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
             conn.close()
             db_has_data = count > 0
         except Exception:
             pass
-
     kw_size_gb = kw_size_mb = 0
     if kw.exists():
         size_bytes = kw.stat().st_size
         kw_size_gb = size_bytes / (1024 ** 3)
         kw_size_mb = size_bytes / (1024 ** 2)
-
     return {
         "db": DB_FILE.exists(),
         "db_has_data": db_has_data,
@@ -210,8 +148,9 @@ def print_status(status: dict):
 
 
 # ============================================================
-# 5. СПРАВКА ПЕРЕД ЗАПУСКОМ
+# СПРАВКА ПЕРЕД ЗАПУСКОМ
 # ============================================================
+
 def show_help(title: str, desc: str, reads: list, writes: list, time_est: str):
     with screen(title):
         print(f"Что делает:\n  {desc}\n")
@@ -222,12 +161,13 @@ def show_help(title: str, desc: str, reads: list, writes: list, time_est: str):
         for w in writes:
             print(f"  - {w}")
         print(f"\nВремя выполнения: {time_est}")
-    input("Нажмите Enter для запуска...  ")
+        input("Нажмите Enter для запуска...  ")
 
 
 # ============================================================
-# 6. YAML КОНФИГ
+# YAML КОНФИГ (через common.py)
 # ============================================================
+
 DEFAULT_CORE_BUILDER = {
     "max_core_size": 200,
     "min_connections": 1,
@@ -243,24 +183,8 @@ DEFAULT_CORE_BUILDER = {
 }
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    out = dict(base)
-    for k, v in (override or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-
 def load_core_config() -> dict:
-    if yaml is None:
-        raise RuntimeError(
-            "PyYAML не установлен. Выполните: .venv\\Scripts\\pip install pyyaml"
-        )
-    cfg = {}
-    if CORE_CONFIG_FILE.exists():
-        cfg = yaml.safe_load(CORE_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+    cfg = load_yaml(CORE_CONFIG_FILE)
     if not isinstance(cfg.get("core_builder"), dict):
         cfg["core_builder"] = {}
     cfg["core_builder"] = _deep_merge(DEFAULT_CORE_BUILDER, cfg["core_builder"])
@@ -268,84 +192,12 @@ def load_core_config() -> dict:
 
 
 def save_core_config(cfg: dict) -> bool:
-    try:
-        if CORE_CONFIG_FILE.exists():
-            backup = Path(str(CORE_CONFIG_FILE) + ".bak")
-            copy_file = __import__("shutil").copy2
-            copy_file(CORE_CONFIG_FILE, backup)
-        CORE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CORE_CONFIG_FILE.write_text(
-            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False, default_flow_style=False),
-            encoding="utf-8",
-        )
-        return True
-    except Exception as e:
-        error(f"Не удалось сохранить конфиг: {e}")
-        pause()
-        return False
+    return save_yaml(CORE_CONFIG_FILE, cfg, backup=True)
 
 
 # ============================================================
-# 7. ВВОД ЗНАЧЕНИЙ
+# ПОЛЯ ПАРАМЕТРОВ (dataclass Field из common.py)
 # ============================================================
-def prompt_int(label: str, current, allow_none: bool = False, min_value: int = 0):
-    cur_str = "не задан" if current is None else str(current)
-    hint = "Enter=оставить, число=новое" + (", '-'=не задан" if allow_none else "")
-    raw = input(f"  {label} [{cur_str}] ({hint}): ").strip()
-    if raw == "":
-        return UNCHANGED
-    if allow_none and raw.lower() in ("-", "none", "нет"):
-        return None
-    if raw.isdigit():
-        v = int(raw)
-        if v < min_value:
-            error(f"Минимальное значение: {min_value}")
-            pause()
-            return UNCHANGED
-        return v
-    error("Некорректное число.")
-    pause()
-    return UNCHANGED
-
-
-def prompt_bool(label: str, current: bool):
-    cur = "вкл" if current else "выкл"
-    raw = input(f"  {label} [{cur}] (Enter=оставить, 1=вкл, 0=выкл): ").strip().lower()
-    if raw == "":
-        return UNCHANGED
-    if raw in ("1", "y", "yes", "д", "да", "+", "вкл"):
-        return True
-    if raw in ("0", "n", "no", "н", "нет", "-", "выкл"):
-        return False
-    return UNCHANGED
-
-
-def prompt_choice(label: str, current, options: list):
-    print(f"\n  {label} (текущее: {current})")
-    for i, opt in enumerate(options, 1):
-        mark = " <- текущее" if opt == current else ""
-        print(f"    {i}. {opt}{mark}")
-    raw = input("  Номер (Enter=оставить): ").strip()
-    if raw == "":
-        return UNCHANGED
-    if raw.isdigit() and 1 <= int(raw) <= len(options):
-        return options[int(raw) - 1]
-    return UNCHANGED
-
-
-# ============================================================
-# 8. ПОЛЯ ПАРАМЕТРОВ (dataclass)
-# ============================================================
-@dataclass
-class Field:
-    key: str
-    label: str
-    type: str
-    help: str
-    min: int = 0
-    none: bool = False
-    options: list = dc_field(default_factory=list)
-
 
 MAIN_FIELDS = [
     Field("max_core_size", "max_core_size", "int",
@@ -386,8 +238,9 @@ OUTPUT_FIELDS = [
 
 
 # ============================================================
-# 9. УНИВЕРСАЛЬНЫЕ ЭКРАНЫ
+# УНИВЕРСАЛЬНЫЕ ЭКРАНЫ
 # ============================================================
+
 def params_screen(title: str, cfg: dict, section: dict, fields: list):
     while True:
         with screen(title):
@@ -396,27 +249,27 @@ def params_screen(title: str, cfg: dict, section: dict, fields: list):
                 print(f"  {i}. {f.label} = {fmt_val(section.get(f.key))}")
                 print(f"     {f.help}")
             print()
-            print("  0. <- Назад (изменения сохраняются сразу, бэкап: core_builder.yaml.bak)")
-        choice = input("\n  Номер параметра для изменения: ").strip()
-        if choice == "0":
-            return
-        if not choice.isdigit() or not (1 <= int(choice) <= len(fields)):
-            continue
-        f = fields[int(choice) - 1]
-        cur = section.get(f.key)
-        if f.type == "int":
-            new = prompt_int(f.label, cur, allow_none=f.none, min_value=f.min)
-        elif f.type == "bool":
-            new = prompt_bool(f.label, cur)
-        elif f.type == "choice":
-            new = prompt_choice(f.label, cur, f.options)
-        else:
-            continue
-        if new is UNCHANGED:
-            continue
-        section[f.key] = new
-        if save_core_config(cfg):
-            success(f"{f.label} = {fmt_val(new)}")
+            print("  0.  <- Назад (изменения сохраняются сразу, бэкап: core_builder.yaml.bak)")
+            choice = input("\n  Номер параметра для изменения: ").strip()
+            if choice == "0":
+                return
+            if not choice.isdigit() or not (1 <= int(choice) <= len(fields)):
+                continue
+            f = fields[int(choice) - 1]
+            cur = section.get(f.key)
+            if f.type == "int":
+                new = prompt_int(f.label, cur, allow_none=f.none, min_value=f.min)
+            elif f.type == "bool":
+                new = prompt_bool(f.label, cur)
+            elif f.type == "choice":
+                new = prompt_choice(f.label, cur, f.options)
+            else:
+                continue
+            if new is UNCHANGED:
+                continue
+            section[f.key] = new
+            if save_core_config(cfg):
+                success(f"{f.label} = {fmt_val(new)}")
 
 
 def toggle_list_screen(title: str, items: list, selected: set,
@@ -426,34 +279,35 @@ def toggle_list_screen(title: str, items: list, selected: set,
             if header_note:
                 print(f"\n  {header_note}\n")
             for i, name in enumerate(items, 1):
-                mark = "x" if name in selected else " "
-                print(f"  {i: >3}. [{mark}] {name}")
+                mark = "x" if name in selected else "  "
+                print(f"  {i:>3}. [{mark}] {name}")
             print()
             print("  Номер — вкл/выкл | 'все' — выбрать все | 'сброс' — снять все")
             print("  'e' — переключить общий флаг enabled (если применимо)")
-            print("  0. <- Назад")
-        raw = input("\n  Ваш выбор: ").strip().lower()
-        if raw == "0":
-            return selected, False, None
-        if raw == "e":
-            return selected, False, True
-        if raw == "все":
-            return set(items), True, None
-        if raw == "сброс":
-            return set(), True, None
-        if raw.isdigit() and 1 <= int(raw) <= len(items):
-            name = items[int(raw) - 1]
-            new_selected = set(selected)
-            if name in new_selected:
-                new_selected.discard(name)
-            else:
-                new_selected.add(name)
-            return new_selected, True, None
+            print("  0.  <- Назад")
+            raw = input("\n  Ваш выбор: ").strip().lower()
+            if raw == "0":
+                return selected, False, None
+            if raw == "e":
+                return selected, False, True
+            if raw == "все":
+                return set(items), True, None
+            if raw == "сброс":
+                return set(), True, None
+            if raw.isdigit() and 1 <= int(raw) <= len(items):
+                name = items[int(raw) - 1]
+                new_selected = set(selected)
+                if name in new_selected:
+                    new_selected.discard(name)
+                else:
+                    new_selected.add(name)
+                return new_selected, True, None
 
 
 # ============================================================
-# 10. МЕТКИ СЛОВАРЕЙ
+# МЕТКИ СЛОВАРЕЙ
 # ============================================================
+
 def core_mark_dicts_screen(cfg: dict):
     md = cfg["core_builder"]["mark_dicts"]
     while True:
@@ -468,22 +322,22 @@ def core_mark_dicts_screen(cfg: dict):
             print(f"  3. files   = {md.get('files') or '[]'}")
             print("     Выбрать конкретные файлы (работает при use_all=выкл)")
             print()
-            print("  0. <- Назад")
-        choice = input("\n  Ваш выбор: ").strip()
-        if choice == "0":
-            return
-        if choice == "1":
-            new = prompt_bool("enabled", md.get("enabled"))
-            if new is not UNCHANGED:
-                md["enabled"] = new
-                save_core_config(cfg)
-        elif choice == "2":
-            new = prompt_bool("use_all", md.get("use_all"))
-            if new is not UNCHANGED:
-                md["use_all"] = new
-                save_core_config(cfg)
-        elif choice == "3":
-            core_dict_files_screen(cfg)
+            print("  0.  <- Назад")
+            choice = input("\n  Ваш выбор: ").strip()
+            if choice == "0":
+                return
+            if choice == "1":
+                new = prompt_bool("enabled", md.get("enabled"))
+                if new is not UNCHANGED:
+                    md["enabled"] = new
+                    save_core_config(cfg)
+            elif choice == "2":
+                new = prompt_bool("use_all", md.get("use_all"))
+                if new is not UNCHANGED:
+                    md["use_all"] = new
+                    save_core_config(cfg)
+            elif choice == "3":
+                core_dict_files_screen(cfg)
 
 
 def core_dict_files_screen(cfg: dict):
@@ -491,19 +345,17 @@ def core_dict_files_screen(cfg: dict):
     if not DICT_DIR.exists():
         with screen("Ошибка"):
             error(f"Каталог dict/ не найден: {DICT_DIR}")
-        pause()
+            pause()
         return
     files = sorted(p.name for p in DICT_DIR.glob("*.txt"))
     if not files:
         with screen("Ошибка"):
             error("В каталоге dict/ нет файлов .txt")
-        pause()
+            pause()
         return
-
     selected = set(md.get("files") or [])
     note = ("[!] use_all=вкл — сейчас используются ВСЕ файлы. "
             "Выбор действует при use_all=выкл.") if md.get("use_all") else ""
-
     while True:
         new_selected, changed, _ = toggle_list_screen(
             "ВЫБОР ФАЙЛОВ СЛОВАРЕЙ (dict/*.txt)", files, selected, note
@@ -516,13 +368,14 @@ def core_dict_files_screen(cfg: dict):
 
 
 # ============================================================
-# 11. МЕТКИ ГРУПП
+# МЕТКИ ГРУПП
 # ============================================================
+
 def get_db_group_names() -> list:
     if not DB_FILE.exists():
         return []
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(str(DB_FILE))
         rows = conn.execute("SELECT name FROM groups ORDER BY name").fetchall()
         conn.close()
         return [r[0] for r in rows]
@@ -547,7 +400,6 @@ def core_mark_groups_screen(cfg: dict):
     db_groups = get_db_group_names()
     enabled = _enabled_groups_from_cfg(mg.get("groups", {}))
     all_names = sorted(set(db_groups) | enabled)
-
     if not all_names:
         with screen("Группы не найдены"):
             error("Группы в БД не найдены (таблица groups пуста или БД отсутствует).")
@@ -558,9 +410,9 @@ def core_mark_groups_screen(cfg: dict):
             save_core_config(cfg)
         pause()
         return
-
     while True:
-        note = f"enabled = {fmt_val(mg.get('enabled'))}   (команда 'e' — переключить)\n  Отмечено групп: {len(enabled)} из {len(all_names)}"
+        note = (f"enabled = {fmt_val(mg.get('enabled'))}   (команда 'e' — переключить)\n"
+                f"  Отмечено групп: {len(enabled)} из {len(all_names)}")
         new_enabled, changed, toggle_flag = toggle_list_screen(
             "МЕТКИ ГРУПП ИЗ БД (mark_groups) — пометки 'group', НЕ исключения",
             all_names, enabled, note
@@ -577,8 +429,9 @@ def core_mark_groups_screen(cfg: dict):
 
 
 # ============================================================
-# 12. СТАРТОВЫЕ СЛОВА
+# СТАРТОВЫЕ СЛОВА
 # ============================================================
+
 def _read_start_words() -> list:
     if not START_WORDS_FILE.exists():
         return []
@@ -601,7 +454,7 @@ def core_start_words_screen():
                 print(f"  [!] Файл не найден: {START_WORDS_FILE}")
             print()
             for i, w in enumerate(words[:30], 1):
-                print(f"  {i: >3}. {w}")
+                print(f"  {i:>3}. {w}")
             if len(words) > 30:
                 print(f"  ... и ещё {len(words) - 30} (пункт 3 — показать все)")
             print()
@@ -609,49 +462,50 @@ def core_start_words_screen():
             print("  2. Удалить слова по номерам (через запятую)")
             print("  3. Показать все слова")
             print("  4. Очистить файл")
-            print("  0. <- Назад")
-        choice = input("\n  Ваш выбор: ").strip()
-        if choice == "0":
-            return
-        if choice == "1":
-            raw = input("  Слова через запятую: ").strip()
-            new_words = [w.strip().lower() for w in raw.split(",") if w.strip()]
-            added = [w for w in new_words if w and w not in words]
-            if added:
-                words.extend(added)
-                _write_start_words(words)
-                success(f"Добавлено: {len(added)}")
-            else:
-                print("  [--] Новых слов нет (пусто или уже в списке).")
-            pause()
-        elif choice == "2":
-            raw = input("  Номера для удаления (через запятую): ").strip()
-            nums = sorted({int(x) for x in raw.split(",") if x.strip().isdigit()}, reverse=True)
-            removed = 0
-            for n in nums:
-                if 1 <= n <= len(words):
-                    words.pop(n - 1)
-                    removed += 1
-            if removed:
-                _write_start_words(words)
-                success(f"Удалено: {removed}")
-            pause()
-        elif choice == "3":
-            with screen(f"Все стартовые слова ({len(words)})"):
-                print()
-                for i, w in enumerate(words, 1):
-                    print(f"  {i: >4}. {w}")
-            pause()
-        elif choice == "4":
-            if confirm("Точно очистить файл?"):
-                _write_start_words([])
-                success("Файл очищен.")
-                pause()
+            print("  0.  <- Назад")
+            choice = input("\n  Ваш выбор: ").strip()
+            if choice == "0":
+                return
+            if choice == "1":
+                raw = input("  Слова через запятую: ").strip()
+                new_words = [w.strip().lower() for w in raw.split(",") if w.strip()]
+                added = [w for w in new_words if w and w not in words]
+                if added:
+                    words.extend(added)
+                    _write_start_words(words)
+                    success(f"Добавлено: {len(added)}")
+                else:
+                    print("  [--] Новых слов нет (пусто или уже в списке).")
+                    pause()
+            elif choice == "2":
+                raw = input("  Номера для удаления (через запятую): ").strip()
+                nums = sorted({int(x) for x in raw.split(",") if x.strip().isdigit()}, reverse=True)
+                removed = 0
+                for n in nums:
+                    if 1 <= n <= len(words):
+                        words.pop(n - 1)
+                        removed += 1
+                if removed:
+                    _write_start_words(words)
+                    success(f"Удалено: {removed}")
+                    pause()
+            elif choice == "3":
+                with screen(f"Все стартовые слова ({len(words)})"):
+                    print()
+                    for i, w in enumerate(words, 1):
+                        print(f"  {i:>4}. {w}")
+                    pause()
+            elif choice == "4":
+                if confirm("Точно очистить файл?"):
+                    _write_start_words([])
+                    success("Файл очищен.")
+                    pause()
 
 
 # ============================================================
-# 13. ПРЕСЕТЫ
+# ПРЕСЕТЫ
 # ============================================================
+
 CORE_PRESETS = {
     "1": {
         "name": "Быстрый (черновой прогон)",
@@ -705,26 +559,27 @@ def core_presets_screen(cfg: dict):
             for key, p in CORE_PRESETS.items():
                 print(f"  {key}. {p['name']}")
                 print(f"     {p['desc']}")
-                print()
-            print("  0. <- Назад")
-        choice = input("\n  Ваш выбор: ").strip()
-        if choice == "0":
-            return
-        preset = CORE_PRESETS.get(choice)
-        if not preset:
-            continue
-        print(f"\n  Параметры пресета '{preset['name']}':")
-        print("   " + json.dumps(preset["values"], ensure_ascii=False, indent=2).replace("\n", "\n   "))
-        if confirm("Применить?"):
-            cfg["core_builder"] = _deep_merge(cfg["core_builder"], preset["values"])
-            if save_core_config(cfg):
-                success("Пресет применён и сохранён.")
-            pause()
+            print()
+            print("  0.  <- Назад")
+            choice = input("\n  Ваш выбор: ").strip()
+            if choice == "0":
+                return
+            preset = CORE_PRESETS.get(choice)
+            if not preset:
+                continue
+            print(f"\n  Параметры пресета '{preset['name']}':")
+            print("    " + json.dumps(preset["values"], ensure_ascii=False, indent=2).replace("\n", "\n    "))
+            if confirm("Применить?"):
+                cfg["core_builder"] = _deep_merge(cfg["core_builder"], preset["values"])
+                if save_core_config(cfg):
+                    success("Пресет применён и сохранён.")
+                    pause()
 
 
 # ============================================================
-# 14. ПРОСМОТР / СБРОС КОНФИГА
+# ПРОСМОТР / СБРОС КОНФИГА
 # ============================================================
+
 def core_show_config_screen(cfg: dict):
     with screen("ТЕКУЩИЙ КОНФИГ (config/core_builder.yaml)"):
         if CORE_CONFIG_FILE.exists():
@@ -734,41 +589,45 @@ def core_show_config_screen(cfg: dict):
             print("\n  [!] Файл ещё не создан — действуют значения по умолчанию:")
             print("  (файл появится после первого изменения любого параметра)\n")
             print(json.dumps({"core_builder": cfg["core_builder"]}, ensure_ascii=False, indent=2))
-    pause()
+        pause()
 
 
 def core_reset_screen(cfg: dict):
     with screen("СБРОС ПАРАМЕТРОВ К ЗНАЧЕНИЯМ ПО УМОЛЧАНИЮ"):
         print("\n  Будут восстановлены значения:")
-        print("   " + json.dumps(DEFAULT_CORE_BUILDER, ensure_ascii=False, indent=2).replace("\n", "\n   "))
+        print("    " + json.dumps(DEFAULT_CORE_BUILDER, ensure_ascii=False, indent=2).replace("\n", "\n    "))
         print("\n  Старый конфиг сохранится в core_builder.yaml.bak")
-    if confirm("Сбросить?"):
-        cfg["core_builder"] = copy.deepcopy(DEFAULT_CORE_BUILDER)
-        if save_core_config(cfg):
-            success("Сброшено к значениям по умолчанию.")
-        pause()
+        if confirm("Сбросить?"):
+            cfg["core_builder"] = copy.deepcopy(DEFAULT_CORE_BUILDER)
+            if save_core_config(cfg):
+                success("Сброшено к значениям по умолчанию.")
+                pause()
 
 
 # ============================================================
-# 15. СПРАВКА ПО АЛГОРИТМУ
+# СПРАВКА ПО АЛГОРИТМУ
 # ============================================================
+
 CORE_HELP_TEXT = """
 ЭТАПЫ РАБОТЫ АЛГОРИТМА:
 0. Предзагрузка БД в память: words, total_links, groups (один проход)
-1. Проверка/создание 7 индексов:
+   Проверка/создание 7 индексов:
    idx_words_word, idx_links_word1, idx_links_word2,
    idx_links_word1_word2, idx_group_words_word_id,
    idx_group_words_group_id, idx_groups_name
-2. Загрузка меток: dict/*.txt ('dict') и группы БД ('group')
+   Загрузка меток: dict/*.txt ('dict') и группы БД ('group')
    — это ПОМЕТКИ в выводе, слова НЕ исключаются
-3. Для каждого слова из start_words.txt (итерации до max_core_size):
+
+1. Для каждого слова из start_words.txt (итерации до max_core_size):
    а) соседи всех слов ядра (топ-2000 связей по весу, кэшируются)
    б) фильтры: min/max_connections, min/max_word_freq, min_link_weight
    в) score = (сумма весов связей - максимальный вес) / частота слова
    г) выбирается кандидат с максимальным score
    д) добавляется в ядро, повтор до max_core_size или пока есть кандидаты
-4. Чекпоинт каждые checkpoint.interval итераций (если включён)
-5. Сохранение core_words.csv / core_words.txt:
+
+2. Чекпоинт каждые checkpoint.interval итераций (если включён)
+
+3. Сохранение core_words.csv / core_words.txt:
    сначала слова без меток, затем с метками; сортировка по частоте
 
 ВСЕ ПАРАМЕТРЫ (config/core_builder.yaml -> core_builder):
@@ -807,28 +666,28 @@ CORE_HELP_TEXT = """
 def core_help_screen():
     with screen("СПРАВКА: СБОРКА СЕМАНТИЧЕСКОГО ЯДРА (core_builder.py)"):
         print(CORE_HELP_TEXT)
-    pause()
+        pause()
 
 
 # ============================================================
-# 16. ЗАПУСКИ core_builder.py
+# ЗАПУСКИ core_builder.py
 # ============================================================
+
 def core_launch(cfg: dict, extra_args: list = None, mode: str = "Обычный запуск"):
     cb = cfg["core_builder"]
     if not DB_FILE.exists():
         with screen("Ошибка"):
             error(f"БД не найдена: {DB_FILE}")
             print("     Сначала выполните 'Инициализация проекта' и внесите keywords.txt в базу.")
-        pause()
+            pause()
         return
     start_words = _read_start_words()
     if not start_words:
         with screen("Ошибка"):
             error(f"Файл стартовых слов пуст или не найден: {START_WORDS_FILE}")
             print("     Добавьте слова через пункт 'Стартовые слова'.")
-        pause()
+            pause()
         return
-
     with screen(f"СБОРКА ЯДРА — {mode}"):
         print(f"\n  Стартовых слов: {len(start_words)}")
         print("\n  Текущие параметры:")
@@ -850,7 +709,6 @@ def core_launch(cfg: dict, extra_args: list = None, mode: str = "Обычный 
             print(f"\n  Флаги запуска: {' '.join(extra_args)}")
         print("\n  Этапы: предзагрузка БД -> индексы -> метки -> итерации отбора")
         print("         (соседи -> фильтры -> score -> лучший кандидат) -> чекпоинты -> сохранение")
-
         reads = ["data/input/start_words.txt", "data/output/semantics.db", "config/core_builder.yaml"]
         if md.get("enabled"):
             reads.append("dict/*.txt")
@@ -870,7 +728,6 @@ def core_launch(cfg: dict, extra_args: list = None, mode: str = "Обычный 
             print(f"    - {w}")
         print(f"\n  Время: ~{max(1, len(start_words))}–{max(3, len(start_words) * 3)} мин  "
               f"(зависит от max_core_size и связности графа)")
-
     choice = input("  Enter — запуск, 0 — отмена: ").strip()
     if choice == "0":
         return
@@ -883,7 +740,7 @@ def core_check_indexes():
     if not DB_FILE.exists():
         with screen("Ошибка"):
             error(f"БД не найдена: {DB_FILE}")
-        pause()
+            pause()
         return
     with screen("ПРОВЕРКА/СОЗДАНИЕ ИНДЕКСОВ БД (--check-indexes)"):
         print("\n  Проверяет и при необходимости создаёт 7 индексов:")
@@ -895,17 +752,18 @@ def core_check_indexes():
         print("    - idx_group_words_group_id  (group_words.group_id)")
         print("    - idx_groups_name           (groups.name)")
         print("\n  Данные НЕ меняются. На большой БД создание индексов может занять минуты.")
-    choice = input("  Enter — запуск, 0 — отмена: ").strip()
-    if choice == "0":
-        return
-    print()
-    run_script("core_builder.py", ["--check-indexes"])
-    pause()
+        choice = input("  Enter — запуск, 0 — отмена: ").strip()
+        if choice == "0":
+            return
+        print()
+        run_script("core_builder.py", ["--check-indexes"])
+        pause()
 
 
 # ============================================================
-# 17. ПОДМЕНЮ СБОРКИ ЯДРА
+# ПОДМЕНЮ СБОРКИ ЯДРА
 # ============================================================
+
 def menu_core(status: dict):
     while True:
         try:
@@ -915,9 +773,8 @@ def menu_core(status: dict):
                 error("Не удалось прочитать config/core_builder.yaml")
                 print(f"  {e}")
                 print("  Проверьте, что pyyaml установлен в .venv (есть в requirements.txt).")
-            pause()
+                pause()
             return
-
         cb = cfg["core_builder"]
         with screen("СБОРКА СЕМАНТИЧЕСКОГО ЯДРА (core_builder.py)"):
             cfg_note = "" if CORE_CONFIG_FILE.exists() else "  (файл не создан — значения по умолчанию)"
@@ -950,7 +807,6 @@ def menu_core(status: dict):
             print("  15. Справка: все параметры и этапы алгоритма")
             print()
             print("   0. <- Назад в главное меню")
-
         choice = input("\n  Ваш выбор: ").strip()
         handlers = {
             "1":  lambda: core_launch(cfg),
@@ -980,14 +836,16 @@ def menu_core(status: dict):
 
 
 # ============================================================
-# 18. ОСТАЛЬНЫЕ ПУНКТЫ МЕНЮ
+# ОСТАЛЬНЫЕ ПУНКТЫ МЕНЮ
 # ============================================================
+
 def menu_init(status: dict):
     clear_screen()
     print("\n  Инициализация проекта")
     print("  =====================")
     print("  Подготовка рабочего окружения...\n")
-    run_script("init_project.py")
+    # Обновлено: теперь вызываем data_tools.py init
+    run_script("data_tools.py", ["init"])
     pause()
 
 
@@ -1002,10 +860,9 @@ def menu_build_graph(status: dict):
             print("\n  Что делаем?")
             print("    1. Продолжить всё равно (будет долго)")
             print("    0. Вернуться в меню и сжать файл")
-        choice = input("\n  Ваш выбор: ").strip()
-        if choice != "1":
-            return
-
+            choice = input("\n  Ваш выбор: ").strip()
+            if choice != "1":
+                return
     show_help(
         "Внести данные в базу данных из keywords.txt",
         "Читает фразы и частоты, лемматизирует слова и добавляет новые связи в граф.",
@@ -1023,14 +880,12 @@ def menu_filter_keywords(status: dict):
         with screen("Ошибка"):
             error("Файл keywords.txt не найден.")
             print(f"     Путь: {kw_path}")
-        pause()
+            pause()
         return
-
     while True:
         size_gb = kw_path.stat().st_size / (1024 ** 3)
         size_mb = kw_path.stat().st_size / (1024 ** 2)
         size_str = f"{size_gb:.2f} ГБ" if size_gb >= 1 else f"{size_mb:.1f} МБ"
-
         with screen("СЖАТИЕ keywords.txt — удаление мусорных строк"):
             print(f"\n  Файл: {kw_path.relative_to(ROOT)}")
             print(f"  Размер: {size_str}")
@@ -1056,19 +911,20 @@ def menu_filter_keywords(status: dict):
             print("    6. Применить с порогом > 10000 (очень жёсткая)")
             print("    7. Применить с СВОИМ порогом")
             print("    0. <- Назад в главное меню")
-
         choice = input("\n  Ваш выбор: ").strip()
         if choice == "0":
             return
         if choice == "1":
             print("\n  Запуск предпросмотра (dry-run)...\n")
-            run_script("filter_keywords.py")
+            # Обновлено: вызываем data_tools.py filter без --apply
+            run_script("data_tools.py", ["filter"])
             pause()
         elif choice in ("2", "3", "4", "5", "6"):
             thresholds = {"2": 5, "3": 10, "4": 100, "5": 1000, "6": 10000}
             threshold = thresholds[choice]
             print(f"\n  Применение с порогом > {threshold}...\n")
-            run_script("filter_keywords.py", ["--threshold", str(threshold), "--apply"])
+            # Обновлено: data_tools.py filter --threshold N --apply
+            run_script("data_tools.py", ["filter", "--threshold", str(threshold), "--apply"])
             pause()
         elif choice == "7":
             custom = input("  Введите порог (число): ").strip()
@@ -1077,7 +933,7 @@ def menu_filter_keywords(status: dict):
                 pause()
                 continue
             print(f"\n  Применение с порогом > {custom}...\n")
-            run_script("filter_keywords.py", ["--threshold", custom, "--apply"])
+            run_script("data_tools.py", ["filter", "--threshold", custom, "--apply"])
             pause()
         else:
             error("Неверный выбор.")
@@ -1087,79 +943,51 @@ def menu_filter_keywords(status: dict):
 def menu_hypotheses(status: dict):
     show_help(
         "Собрать связи через слово (из start_words.txt)",
-        "Ищет отсутствующие прямые связи через BFS глубиной 2 (гипотезы семантического расширения).",
+        "Ищет отсутствующие прямые связи через BFS глубиной 2 (гипотезы семантического расширения).\n"
+        "Флаг --xlsx: экспорт дерева связанных запросов в XLSX для Яндекс.Директ.",
         ["data/input/start_words.txt", "data/output/semantics.db"],
-        ["data/output/hypotheses.txt"],
+        ["data/output/hypotheses.txt", "data/output/TreeToYandexDirect.xlsx (если --xlsx)"],
         "~2-10 минут (зависит от связности графа)",
     )
-    run_script("hypothesis_finder.py")
-    pause()
+    while True:
+        clear_screen()
+        print("\n" + "=" * 70)
+        print("  ПОИСК ГИПОТЕЗ / ЭКСПОРТ ДЕРЕВА")
+        print("=" * 70)
+        print()
+        print("  1. Поиск гипотез (обычный режим)")
+        print("  2. Экспорт дерева в XLSX для Яндекс.Директ (--xlsx)")
+        print("  0. <- Назад")
+        choice = input("\n  Ваш выбор: ").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            run_script("hypothesis_finder.py")
+            pause()
+        elif choice == "2":
+            run_script("hypothesis_finder.py", ["--xlsx"])
+            pause()
+        else:
+            error("Неверный выбор.")
+            pause()
 
 
 def menu_facets(status: dict):
     show_help(
         "Классификация слов по группам (ИИ)",
-        "Отправляет слова из базы на фасетную классификацию через ансамбль LLM-моделей.",
+        "Отправляет слова из базы на фасетную классификацию через ансамбль LLM-моделей.\n"
+        "Использует все провайдеры из AI_PROVIDERS (Alibaba, OpenRouter, Groq, ...).\n"
+        "Голосование MIN_VOTES судей, обработка 429, сохранение состояний в bad_models.txt.",
         ["data/output/semantics.db", ".env (API-ключи)"],
-        ["data/output/facets.txt", "data/output/bad_models.txt"],
+        ["data/output/last_facets.txt", "data/output/bad_models.txt",
+         "data/output/ai_1_*.txt", "data/output/ai_2_*.txt",
+         "data/output/judges_raw.json"],
         "Зависит от количества слов и скорости API (минуты/часы)",
     )
-    run_script("ai_classifier.py")
+    # Обновлено: теперь вызываем facet_processor.py (в нём и AI, и HypothesisFinder)
+    run_script("facet_processor.py")
     pause()
 
-
-def menu_test_api(status: dict):
-    clear_screen()
-    print("\n  Тест API-ключей")
-    print("  ===============\n")
-    run_script("test_openrouter_api.py")
-    pause()
-
-def menu_cleanup_orphans(status: dict):
-    """Очистка слов без связей."""
-    if not status.get("db"):
-        clear_screen()
-        print("\n  [!] БД не найдена. Сначала выполните инициализацию.")
-        input("\n  Нажмите Enter...")
-        return
-
-    while True:
-        clear_screen()
-        print("\n" + "=" * 70)
-        print("  ОЧИСТКА БД ОТ СЛОВ БЕЗ СВЯЗЕЙ")
-        print("=" * 70)
-        print("\n  Удаляет из words и group_words записи,")
-        print("  у которых нет ни одной связи в таблице links.")
-        print("\n  Зачем:")
-        print("    - уменьшает размер БД (иногда на 30-50%)")
-        print("    - ускоряет все запросы (меньше данных)")
-        print("    - не влияет на сборку ядра (сироты там не используются)")
-        print("\n  Безопасность:")
-        print("    - автоматически создаётся бэкап БД")
-        print("    - всё в транзакции — при ошибке откат")
-        print("    - links и groups не трогаются")
-        print("\n" + "-" * 70)
-        print("  МЕНЮ:")
-        print()
-        print("    1. Предпросмотр (показать, что будет удалено)")
-        print("    2. Применить очистку (с бэкапом и VACUUM)")
-        print("    0. Назад в главное меню")
-        print()
-
-        choice = input("  Ваш выбор: ").strip()
-        if choice == "0":
-            return
-        elif choice == "1":
-            print("\n  Запуск предпросмотра...\n")
-            run_script("cleanup_orphan_words.py")
-            input("\n  Нажмите Enter...")
-        elif choice == "2":
-            print("\n  Запуск очистки...\n")
-            run_script("cleanup_orphan_words.py", ["--apply"])
-            input("\n  Нажмите Enter...")
-        else:
-            print("  Неверный выбор.")
-            input("  Нажмите Enter...")
 
 def menu_help(status: dict):
     with screen("СПРАВКА"):
@@ -1177,39 +1005,41 @@ def menu_help(status: dict):
         print("  - Python 3.10+")
         print("  - API-ключ хотя бы одного ИИ-PROVIDER (для фасетной классификации)")
         print("  - ~2 ГБ свободного места для базы данных")
-    pause()
+        pause()
 
 
 # ============================================================
-# 19. ЭКСПОРТ ДАННЫХ ИЗ БД В ФАЙЛЫ
+# ЭКСПОРТ ДАННЫХ ИЗ БД В ФАЙЛЫ
 # ============================================================
+
 def menu_export_db(status: dict):
     with screen("ЭКСПОРТ ДАННЫХ ИЗ БД В ТЕКСТОВЫЕ ФАЙЛЫ"):
         print(f"\n  БД: {DB_FILE}")
         print(f"  Размер БД: {status.get('db_size_mb', 0)} МБ")
         print(f"\n  Экспортирует данные в каталог: {SEED_DIR}")
         print("\n  Будут созданы файлы:")
-        print("    - words.txt        (слова и частоты)")
-        print("    - links.txt        (связи между словами)")
-        print("    - groups.txt       (названия групп)")
-        print("    - group_words.txt  (слова в группах)")
+        print("    - words.csv        (слова и частоты)")
+        print("    - links.csv        (связи между словами)")
+        print("    - groups.csv       (названия групп)")
+        print("    - group_words.csv  (слова в группах)")
+        print("    - *.7z.*           (многотомные архивы < 95 МБ)")
         print("\n  Эти файлы можно:")
         print("    - перенести на другой компьютер вместе с проектом")
         print("    - использовать как бэкап данных")
         print("    - загрузить через 'Инициализация проекта' на новом месте")
         print("\n  Существующие файлы в data/seed/ будут перезаписаны.")
-
-    if not confirm("Выполнить экспорт?"):
-        return
-
+        if not confirm("Выполнить экспорт?"):
+            return
     print()
-    run_script("export_db.py")
+    # Обновлено: вызываем data_tools.py export
+    run_script("data_tools.py", ["export"])
     pause()
 
 
 # ============================================================
-# 20. ГЛАВНОЕ МЕНЮ (декларативно)
+# ГЛАВНОЕ МЕНЮ (декларативно)
 # ============================================================
+
 # (key, label_fn, visible_fn, handler)
 MENU_ITEMS = [
     (
@@ -1221,7 +1051,7 @@ MENU_ITEMS = [
     (
         "export_db",
         lambda s: "Экспорт данных из БД в файлы (для переноса/бэкапа)",
-        lambda s: s["db"] and s["db_has_data"],  # <-- показываем только если БД есть и не пустая
+        lambda s: s["db"] and s["db_has_data"],
         menu_export_db,
     ),
     (
@@ -1246,7 +1076,7 @@ MENU_ITEMS = [
     ),
     (
         "hypotheses",
-        lambda s: "Собрать связи через слово (из start_words.txt)",
+        lambda s: "Поиск гипотез / Экспорт дерева в XLSX (из start_words.txt)",
         lambda s: s["db"],
         menu_hypotheses,
     ),
@@ -1255,12 +1085,6 @@ MENU_ITEMS = [
         lambda s: "Классификация слов по группам (ИИ)",
         lambda s: s["env"],
         menu_facets,
-    ),
-    (
-        "test_api",
-        lambda s: "Тест API-ключей",
-        lambda s: True,
-        menu_test_api,
     ),
     (
         "help",
@@ -1279,42 +1103,36 @@ def render_and_dispatch(status: dict) -> bool:
     for num, key, label, _ in visible:
         print(f"  {num}. {label}")
     print("  0. Выход\n")
-
     choice = input("  Выберите действие (0-9): ").strip()
     if choice == "0":
         return False
-
     if choice.isdigit():
         idx = int(choice)
         match = [item for item in visible if item[0] == idx]
         if match:
             _, _, _, handler = match[0]
             handler(status)
-            # <-- ВАЖНО: очищаем экран после выполнения пункта меню,
-            # чтобы при возврате в главное меню не было "каши" из предыдущего вывода
             clear_screen()
             return True
-
     error("Неверный выбор.")
     pause()
     return True
 
 
 # ============================================================
-# 21. ТОЧКА ВХОДА
+# ТОЧКА ВХОДА
 # ============================================================
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-
-    ensure_venv()  # <-- убран первый заголовок (был дубль)
-
+    ensure_venv()
     while True:
         status = check_status()
         clear_screen()
-        print("\n  Semantic Facet Analyzer — Лаунчер\n")  # <-- единственный заголовок
+        print("\n  Semantic Facet Analyzer — Лаунчер\n")
         print_status(status)
         if not render_and_dispatch(status):
             clear_screen()

@@ -1,17 +1,17 @@
 core_builder:
-  max_core_size: 50
-  min_connections: 2
+  max_core_size: 200
+  min_connections: 1
   max_connections: null
-  min_link_weight: 5
-  min_word_freq: 10
+  min_link_weight: 0
+  min_word_freq: 0
   max_word_freq: null
   collect_all: true
   checkpoint:
-    enabled: false
+    enabled: true
     interval: 10
   output:
     format: csv
-    include_all: false
+    include_all: true
     show_marks: true
   mark_dicts:
     enabled: true

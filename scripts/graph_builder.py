@@ -1,38 +1,33 @@
 ﻿"""
 Построение графа связей из keywords.txt — v10.
-
 Словарь из БД (lemmas + words), лемматизации в горячем цикле нет.
 Файл может иметь 3+ колонки: запрос <TAB> показы <TAB> точные показы.
 ВЕС (сумма показов) и DF (число разных запросов) считаются РАЗДЕЛЬНО.
-
 Этапы:
-  scan  — keywords.txt -> ID-файл + вес + DF
-  links — ID-файл -> пары (фильтр по словарю) -> таблица links
-  prune — отсечение по DF пары
-
+scan  — keywords.txt -> ID-файл + вес + DF
+links — ID-файл -> пары (фильтр по словарю) -> таблица links
+prune — отсечение по DF пары
 Что нового в v10 (совместимо с ID-файлом v3 и прогрессом v9):
-  * этап 2 НЕ стартует автоматически без ограничения словаря (--all-lemmas для явного согласия)
-  * --links-restart: принудительный пересчёт связей с нуля (защита от смешения словарей)
-  * подпись словаря (top-lemmas / min-lemma-hits) хранится отдельно и сверяется при resume
-  * weights.bin / hits.bin переименовываются в .bak, а не удаляются
-  * согласованный чекпоинт: stats_meta.json, откат к согласованной точке при resume
-  * links WITHOUT ROWID (авто-миграция пустой таблицы), prune без rowid
-  * flush_links генератором (без списка кортежей на 8 млн строк)
-  * словарь raw_to_id НЕ грузится для links-only / report / prune-only / status / df-hist
-  * один dry_run (с корзиной веса "0"), beta по чередующимся записям
-  * --status, --df-hist, --prune-only, --no-prune, --scan-only
-  * контроль свободного места, --cache-gb, --links-buffer, --report-chunks
-
+этап 2 НЕ стартует автоматически без ограничения словаря (--all-lemmas для явного согласия)
+--links-restart: принудительный пересчёт связей с нуля (защита от смешения словарей)
+подпись словаря (top-lemmas / min-lemma-hits) хранится отдельно и сверяется при resume
+weights.bin / hits.bin переименовываются в .bak, а не удаляются
+согласованный чекпоинт: stats_meta.json, откат к согласованной точке при resume
+links WITHOUT ROWID (авто-миграция пустой таблицы), prune без rowid
+flush_links генератором (без списка кортежей на 8 млн строк)
+словарь raw_to_id НЕ грузится для links-only / report / prune-only / status / df-hist
+один dry_run (с корзиной веса "0"), beta по чередующимся записям
+--status, --df-hist, --prune-only, --no-prune, --scan-only
+контроль свободного места, --cache-gb, --links-buffer, --report-chunks
 Запуск:
-  python scripts/graph_builder.py --dry-run
-  python scripts/graph_builder.py --status
-  python scripts/graph_builder.py                      # scan (после него остановится)
-  python scripts/graph_builder.py --report
-  python scripts/graph_builder.py --links-only --top-lemmas 200000 --min-pair-hits 10
-  python scripts/graph_builder.py --df-hist
-  python scripts/graph_builder.py --prune-only --min-pair-hits 20
+python scripts/graph_builder.py --dry-run
+python scripts/graph_builder.py --status
+python scripts/graph_builder.py                      # scan (после него остановится)
+python scripts/graph_builder.py --report
+python scripts/graph_builder.py --links-only --top-lemmas 200000 --min-pair-hits 10
+python scripts/graph_builder.py --df-hist
+python scripts/graph_builder.py --prune-only --min-pair-hits 20
 """
-
 from pathlib import Path
 import argparse
 import bisect
@@ -50,6 +45,15 @@ from array import array
 from collections import defaultdict, Counter
 from itertools import combinations
 
+from common import (
+    ROOT,
+    INPUT_DIR, INPUT_FILE, MINUS_FILE,
+    OUTPUT_DIR, DB_FILE,
+    PROGRESS_FILE, ID_FILE, WEIGHT_FILE, HITS_FILE, STATS_META_FILE, UNKNOWN_FILE,
+    human, big, fmt, short,
+    POS_RU, STOP_POS, ALLOWED_POS, MIN_LEMMA_LEN,
+)
+
 # ============================================================
 # НАСТРОЙКИ
 # ============================================================
@@ -59,23 +63,14 @@ MIN_PAIR_COUNT = 0           # доп. порог по сумме весов (0 
 TOP_LEMMAS = 0               # 0 = все; иначе топ-N лемм по DF
 MIN_LEMMA_HITS = 0           # 0 = выкл; иначе лемма минимум в N запросах
 MAX_WORDS_PER_QUERY = 8
-MIN_LEMMA_LEN = 2
-
-STOP_POS = ("предлог", "союз", "частица", "местоимение", "предикатив", "междометие")
 CYRILLIC_ONLY = True
-ALLOWED_POS = ("существительное", "прилагательное", "краткое прилагательное",
-               "сравнительная степень", "глагол", "инфинитив",
-               "причастие", "краткое причастие", "деепричастие", "наречие")
-
 TOP_EDGES_PER_NODE = 0
 LEMMATIZE_UNKNOWN = False
 UNKNOWN_DUMP_LIMIT = 100_000
 UNKNOWN_CAP = 1_000_000
 MARK_FILTERED_FORMS = True
-
 QUERY_COL = 0                # 0-based индекс колонки с запросом
 FREQ_COL = -1                # 0-based индекс колонки с весом (-1 = последняя)
-
 NUM_WORKERS = 4
 READ_CHUNK = 32 * 1024 * 1024
 ID_FILE_BUFFER_SIZE = 32 * 1024 * 1024
@@ -88,81 +83,37 @@ STATS_IMPORT_CHUNK = 200_000
 VACUUM_AFTER_PRUNE = False
 CACHE_GB = 1.0
 MAKE_HITS_INDEX = True
-
 SAMPLE_CHUNKS = 32
 SAMPLE_CHUNK_SIZE = 4 * 1024 * 1024
 SAMPLE_MAX_RECORDS = 300_000
-
 REPORT_CHUNKS = 32
 REPORT_CHUNK_SIZE = 1 * 1024 * 1024
 REPORT_TOPN = (50_000, 100_000, 200_000, 300_000, 500_000, 1_000_000, 2_000_000)
 HALF_PAIRS_CAP = 20_000_000
-
 HIT_BITS = 32
 HIT_MASK = 0xFFFFFFFF
 BIG_RANK = 1 << 30
 CNT_BITS = 20
 CNT_MASK = (1 << CNT_BITS) - 1
-
 PROGRESS_VERSION = 10
 COMPAT_VERSIONS = (9, 10)
 ID_FILE_MAGIC = b"KWID"
 ID_FILE_VERSION = 3
-
 ID_STRUCT_HEADER = struct.Struct("<4sB3x")
 ID_STRUCT_COUNT = struct.Struct("<H")
 _PACKERS = [struct.Struct(f"<{k}I") for k in range(65)]
-
 _CYR = re.compile(r"^[а-яё-]+$")
-
-POS_RU = {
-    "NOUN": "существительное", "ADJF": "прилагательное", "ADJS": "краткое прилагательное",
-    "COMP": "сравнительная степень", "VERB": "глагол", "INFN": "инфинитив",
-    "PRTF": "причастие", "PRTS": "краткое причастие", "GRND": "деепричастие",
-    "NUMR": "числительное", "ADVB": "наречие", "NPRO": "местоимение",
-    "PRED": "предикатив", "PREP": "предлог", "CONJ": "союз",
-    "PRCL": "частица", "INTJ": "междометие",
-}
-
 SQL_UPSERT_LINKS = """INSERT INTO links(word1_id, word2_id, count, hits) VALUES(?,?,?,?)
 ON CONFLICT(word1_id, word2_id) DO UPDATE SET
 count = count + excluded.count, hits = hits + excluded.hits"""
-
 SQL_LINKS_WOR = """CREATE TABLE links(
-    word1_id INTEGER NOT NULL, word2_id INTEGER NOT NULL,
-    count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
-    PRIMARY KEY(word1_id, word2_id)) WITHOUT ROWID"""
-
+word1_id INTEGER NOT NULL, word2_id INTEGER NOT NULL,
+count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+PRIMARY KEY(word1_id, word2_id)) WITHOUT ROWID"""
 SQL_LINKS_ROWID = """CREATE TABLE links(
-    word1_id INTEGER NOT NULL, word2_id INTEGER NOT NULL,
-    count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
-    PRIMARY KEY(word1_id, word2_id))"""
-
-
-def find_root() -> Path:
-    try:
-        current = Path(__file__).resolve()
-    except NameError:
-        current = Path.cwd().resolve()
-    for parent in [current.parent] + list(current.parents):
-        if (parent / "data").exists() or (parent / "requirements.txt").exists():
-            return parent
-    return current.parent.parent
-
-
-PROJECT_ROOT = find_root()
-INPUT_DIR = PROJECT_ROOT / "data" / "input"
-INPUT_FILE = INPUT_DIR / "keywords.txt"
-MINUS_FILE = INPUT_DIR / "minus.txt"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-DB_FILE = OUTPUT_DIR / "semantics.db"
-PROGRESS_FILE = OUTPUT_DIR / "progress.json"
-ID_FILE = OUTPUT_DIR / "keywords_ids.bin"
-WEIGHT_FILE = OUTPUT_DIR / "weights.bin"
-HITS_FILE = OUTPUT_DIR / "hits.bin"
-STATS_META_FILE = OUTPUT_DIR / "stats_meta.json"
-UNKNOWN_FILE = OUTPUT_DIR / "unknown_words.txt"
+word1_id INTEGER NOT NULL, word2_id INTEGER NOT NULL,
+count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+PRIMARY KEY(word1_id, word2_id))"""
 
 # ============================================================
 # Состояние
@@ -175,24 +126,20 @@ minus_words = set()
 next_word_id = 1
 max_word_id = 0
 interrupted = False
-
 LINE_DELIM = "\t"
 N_COLS = 3
-
 word_weight = None           # array('q') сумма показов
 word_hits = None             # array('i') число запросов
 stats_size = 0
 node_ok = None
 links_buffer = defaultdict(int)
 unknown_words = Counter()
-
 progress = {
     "version": PROGRESS_VERSION, "stage": "scan",
     "byte_offset": 0, "id_file_offset": 0, "records_written": 0,
     "links_records": 0, "lines": 0, "config": {}, "links_config": {},
     "timestamp": None,
 }
-
 stats = {
     "start": 0.0, "init_end": 0.0,
     "scan_start": 0.0, "scan_end": 0.0,
@@ -202,13 +149,11 @@ stats = {
     "pairs_total": 0, "pairs_kept": 0, "links_saved": 0, "links_final": 0,
     "commits": 0, "dict_forms": 0, "dict_lemmas": 0, "dict_zero": 0,
 }
-
 try:
     import psutil
     _proc = psutil.Process()
 except Exception:
     _proc = None
-
 
 def rss():
     if _proc is None:
@@ -218,37 +163,12 @@ def rss():
     except Exception:
         return ""
 
-
-def fmt(seconds):
-    seconds = max(0, int(seconds))
-    return f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
-
-
-def human(n):
-    n = float(n)
-    for u in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if abs(n) < 1024:
-            return f"{n:.1f} {u}"
-        n /= 1024
-    return f"{n:.1f} ПБ"
-
-
-def big(n):
-    if n >= 1e9:
-        return f"{n / 1e9:.2f} млрд"
-    if n >= 1e6:
-        return f"{n / 1e6:.1f} млн"
-    if n >= 1e3:
-        return f"{n / 1e3:.1f} тыс"
-    return f"{n:.0f}"
-
 # ============================================================
 # Прогресс: одна строка в терминале, редкие строки в логе
 # ============================================================
 IS_TTY = False
 _last_len = 0
 _last_ts = 0.0
-
 
 def init_console():
     global IS_TTY, PROGRESS_EVERY
@@ -259,21 +179,11 @@ def init_console():
     if PROGRESS_EVERY < 0:
         PROGRESS_EVERY = (600.0 if QUIET else 5.0) if IS_TTY else 300.0
 
-
 def term_width():
     try:
         return max(40, shutil.get_terminal_size((100, 25)).columns - 1)
     except Exception:
         return 79
-
-
-def short(n):
-    n = float(n)
-    for div, suf in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
-        if abs(n) >= div:
-            return f"{n / div:.1f}{suf}"
-    return f"{n:.0f}"
-
 
 def rss_s():
     if _proc is None:
@@ -282,7 +192,6 @@ def rss_s():
         return f" | RAM {_proc.memory_info().rss / 1024 ** 3:.1f}Г"
     except Exception:
         return ""
-
 
 def status_line(text, force=False):
     """В терминале — перезапись одной строки, в логе — строка раз в PROGRESS_EVERY."""
@@ -302,7 +211,6 @@ def status_line(text, force=False):
         _last_len = 0
     sys.stdout.flush()
 
-
 def status_end():
     global _last_len
     if IS_TTY and _last_len:
@@ -316,7 +224,6 @@ def free_space(path=None):
     except Exception:
         return 0
 
-
 def check_disk(need_bytes, label):
     free = free_space()
     print(f"💽 Свободно на диске: {human(free)} | нужно ориентировочно {human(need_bytes)} ({label})")
@@ -326,7 +233,6 @@ def check_disk(need_bytes, label):
         print("   ⛔ Меньше 5 ГБ — останавливаюсь, чтобы не убить базу на середине.")
         return False
     return True
-
 
 # ============================================================
 # Прогресс
@@ -341,11 +247,9 @@ def scan_config():
         "mark_filtered": MARK_FILTERED_FORMS,
     }
 
-
 def links_config():
     """Подпись словаря для этапа 2. Смена = связи надо строить заново."""
     return {"top_lemmas": TOP_LEMMAS, "min_lemma_hits": MIN_LEMMA_HITS}
-
 
 def save_progress(update_config=False):
     progress["version"] = PROGRESS_VERSION
@@ -358,7 +262,6 @@ def save_progress(update_config=False):
         json.dump(progress, f, ensure_ascii=False, indent=2)
     os.replace(tmp, PROGRESS_FILE)
 
-
 def load_progress():
     if PROGRESS_FILE.exists():
         try:
@@ -366,13 +269,11 @@ def load_progress():
                 return json.load(f)
         except Exception as e:
             print(f"⚠️ progress.json повреждён: {e}")
-    return None
-
+            return None
 
 def clear_progress():
     if PROGRESS_FILE.exists():
         PROGRESS_FILE.unlink()
-
 
 # ============================================================
 # База
@@ -391,7 +292,6 @@ def connect_db(readonly=False):
     cursor = conn.cursor()
     print(f"🔌 База: {DB_FILE} (кэш {CACHE_GB:.1f} ГБ)")
 
-
 def disconnect_db():
     if conn:
         try:
@@ -403,31 +303,26 @@ def disconnect_db():
         conn.close()
         print("🔌 База закрыта.")
 
-
 def ensure_column(table, col, decl):
     cols = {r[1] for r in cursor.execute(f"PRAGMA table_info({table})")}
     if col not in cols:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         print(f"   ➕ Добавлена колонка {table}.{col}")
 
-
 def links_without_rowid():
     row = cursor.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='links'").fetchone()
     return bool(row and "WITHOUT ROWID" in (row[0] or "").upper())
 
-
 def row_cost():
     return 32 if links_without_rowid() else 55
 
-
 def init_schema():
     cursor.execute("""CREATE TABLE IF NOT EXISTS lemmas(
-        word TEXT PRIMARY KEY, lemma TEXT NOT NULL, pos TEXT)""")
+word TEXT PRIMARY KEY, lemma TEXT NOT NULL, pos TEXT)""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS words(
-        id INTEGER PRIMARY KEY, word TEXT UNIQUE NOT NULL, pos TEXT,
-        count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0)""")
-
+id INTEGER PRIMARY KEY, word TEXT UNIQUE NOT NULL, pos TEXT,
+count INTEGER DEFAULT 0, hits INTEGER DEFAULT 0)""")
     row = cursor.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='links'").fetchone()
     if row is None:
@@ -442,11 +337,9 @@ def init_schema():
         else:
             print("   ⚠️ links в старом формате (rowid) и не пуста — оставляю как есть.")
             print("      Перевод: --links-only --links-restart ... на пустой таблице.")
-
     ensure_column("words", "hits", "INTEGER DEFAULT 0")
     ensure_column("links", "hits", "INTEGER DEFAULT 0")
     conn.commit()
-
     if MAKE_HITS_INDEX:
         has = cursor.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_words_hits'").fetchone()
@@ -456,7 +349,6 @@ def init_schema():
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_words_hits ON words(hits DESC)")
             conn.commit()
             print(f"      готово за {fmt(time.perf_counter() - t)}")
-
 
 def reset_facts():
     print("🗑️ Очистка links и счётчиков (словари сохраняются)...")
@@ -469,7 +361,6 @@ def reset_facts():
         if p.exists():
             p.unlink()
     print(f"   Готово за {fmt(time.perf_counter() - t)}")
-
 
 # ============================================================
 # Формат строки
@@ -493,7 +384,6 @@ def parse_freq(s):
     except ValueError:
         return None
 
-
 def detect_format(verbose=True):
     global LINE_DELIM, N_COLS
     if not INPUT_FILE.exists():
@@ -515,7 +405,6 @@ def detect_format(verbose=True):
     if not samples:
         print("⚠️ Не удалось прочитать примеры строк")
         return
-
     best = (0.0, "\t", 1)
     for delim in ("\t", ";", "|", ","):
         colcount = Counter()
@@ -534,7 +423,6 @@ def detect_format(verbose=True):
         score = (ok / len(samples)) * (modal_n / len(samples))
         if score > best[0]:
             best = (score, delim, modal)
-
     LINE_DELIM, N_COLS = best[1], best[2]
     if verbose:
         print("\n" + "-" * 70)
@@ -553,7 +441,6 @@ def detect_format(verbose=True):
             except IndexError:
                 print("      -> строка не разбирается")
 
-
 # ============================================================
 # Обработчик строки
 # ============================================================
@@ -565,7 +452,6 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
     unk = unknown_words if unk_counter is None else unk_counter
     cap = UNKNOWN_CAP
     fn = funnel
-
     n_unknown = n_filtered = n_kept = 0
     since = 0
 
@@ -582,12 +468,10 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
         since += 1
         if since >= 65536:
             sync()
-
         if fn is not None:
             fn["lines"] += 1
         if not line:
             return None
-
         parts = line.split(delim)
         if len(parts) < 2:
             q, fs = parts[0], ""
@@ -597,12 +481,10 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
                 fs = parts[fcol]
             except IndexError:
                 return None
-
         try:
             freq = int(fs)
         except (ValueError, TypeError):
             freq = parse_freq(fs)
-
         if fn is not None:
             if freq is None:
                 fn["freq_bad"] += 1
@@ -614,22 +496,18 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
                        "2-4" if fv <= 4 else
                        "5-9" if fv <= 9 else
                        "10-99" if fv <= 99 else
-                       "100-9999" if fv <= 9999 else
                        "10000+"] += 1
-
         if freq is None:
             freq = 1
         if freq < min_freq:
             return None
         if fn is not None:
             fn["freq_pass"] += 1
-
         tokens = q.split()
         if len(tokens) < 2:
             return None
         if fn is not None:
             fn["tokens2"] += 1
-
         ids = set()
         add = ids.add
         for tok in tokens:
@@ -642,12 +520,10 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
                 n_filtered += 1
             else:
                 add(wid)
-
         if len(ids) < 2:
             return None
         if fn is not None:
             fn["ids2"] += 1
-
         if len(ids) > max_words:
             ids = set(sorted(ids)[:max_words])
         n_kept += len(ids)
@@ -655,7 +531,6 @@ def make_processor(min_freq, max_words, collect_unknown=True, funnel=None, unk_c
 
     process.sync = sync
     return process
-
 
 # ============================================================
 # DRY RUN
@@ -667,24 +542,20 @@ def dry_run():
     if not INPUT_FILE.exists():
         print(f"❌ Нет файла: {INPUT_FILE}")
         return
-
     size = INPUT_FILE.stat().st_size
     step = max(1, size // SAMPLE_CHUNKS)
     per_chunk = max(1, SAMPLE_MAX_RECORDS // SAMPLE_CHUNKS)
-
     funnel = Counter()
     funnel["hist"] = Counter()
     unk = Counter()
     process = make_processor(MIN_QUERY_FREQ, MAX_WORDS_PER_QUERY,
                              collect_unknown=True, funnel=funnel, unk_counter=unk)
-
     lines = kept = 0
     bytes_read = 0
     recs = []
     lemma_df = Counter()
     lemma_w = Counter()
     t0 = time.perf_counter()
-
     with INPUT_FILE.open("rb") as f:
         for i in range(SAMPLE_CHUNKS):
             f.seek(i * step)
@@ -714,7 +585,6 @@ def dry_run():
                 if got < per_chunk:
                     recs.append((ids, freq))
                     got += 1
-
     process.sync()
     dt = time.perf_counter() - t0
     print(f"\nПрочитано {human(bytes_read)} за {dt:.1f} сек, строк: {lines:,}")
@@ -726,7 +596,6 @@ def dry_run():
         v = funnel[key]
         mark = "   ← ЗДЕСЬ ОБРЫВ" if v == 0 else ""
         print(f"   {label:<28} {v:>12,}  ({v / max(1, lines) * 100:5.1f}%){mark}")
-
     order = ["0", "1", "2-4", "5-9", "10-99", "100-9999", "10000+"]
     mins = [0, 1, 2, 5, 10, 100, 10000]
     print("Распределение веса строки:")
@@ -734,10 +603,8 @@ def dry_run():
         if funnel["hist"][k]:
             note = "   ← фантомные запросы (точных показов нет)" if k == "0" else ""
             print(f"   вес {k:>9}: {funnel['hist'][k] / max(1, lines) * 100:5.1f}%{note}")
-
     print(f"Токенов: взято {stats['tokens_kept']:,}, "
           f"отфильтровано {stats['tokens_filtered']:,}, неизвестно {stats['tokens_unknown']:,}")
-
     if not lines or not recs:
         print("\n❌ ДАННЫХ ПОСЛЕ ФИЛЬТРОВ НЕТ. Смотри воронку выше:")
         if funnel["freq_ok"] == 0:
@@ -753,14 +620,12 @@ def dry_run():
             for w, c in unk.most_common(15):
                 print(f"      {w:<25} {c:,}")
         return
-
     total_lines = size / (bytes_read / lines)
     keep_share = kept / lines
     total_records = total_lines * keep_share
     n = len(recs)
     avg_words = sum(len(i) for i, _ in recs) / n
     avg_rec_bytes = 2 + (avg_words + 1) * 4
-
     total_pairs = 0
     full = set()
     hset = set()
@@ -771,17 +636,14 @@ def dry_run():
             full.add(key)
             if idx & 1:
                 hset.add(key)
-
     u_full, u_half = len(full), len(hset)
     beta = 1.0
     if u_half > 100 and u_full > u_half:
         beta = min(1.0, max(0.5, math.log(u_full / u_half) / math.log(2)))
-
     scale = total_records / n
     proj_pairs = total_pairs * scale
     proj_unique = u_full * (scale ** beta)
     rc = row_cost()
-
     print("-" * 70)
     print(f"Всего строк в файле (оценка):   {big(total_lines)}")
     print(f"Прошло фильтры:                 {kept:,} ({keep_share * 100:.1f}%)")
@@ -821,19 +683,16 @@ def dry_run():
         print(f"   DF {k:>6}: {dfh[k]:,} лемм")
     print(f"   Масштаб выборки ×{df_scale:,.0f} — корпусный DF ориентировочно во столько же раз больше.")
     print("   ➜ Пороги по DF подбираются ТОЧНО командой --report после этапа 1.")
-
     print("\nТоп-20 лемм по DF (числу запросов) в выборке:")
     for wid, c in lemma_df.most_common(20):
         row = cursor.execute("SELECT word FROM words WHERE id=?", (wid,)).fetchone()
         print(f"   {(row[0] if row else wid):<25} запросов {c:>8,}   вес {lemma_w[wid]:,}")
-
     if unk:
         print("\nТоп-10 нераспознанных токенов:")
         for w, c in unk.most_common(10):
             print(f"   {w:<25} {c:,}")
     print("=" * 70)
     print("Порядок: scan → --report → --links-only --top-lemmas N → --df-hist → --prune-only")
-
 
 # ============================================================
 # Массивы статистики
@@ -861,7 +720,6 @@ def init_stats_arrays(load_existing=False):
                 p.unlink()
         print(f"🧮 Массивы статистики: {stats_size:,} ячеек ({human(stats_size * 12)})")
 
-
 def save_stats_arrays(meta=None):
     tw = WEIGHT_FILE.with_suffix(".tmp")
     with tw.open("wb") as f:
@@ -877,7 +735,6 @@ def save_stats_arrays(meta=None):
             json.dump(meta, f)
         os.replace(tm, STATS_META_FILE)
 
-
 def load_stats_meta():
     if STATS_META_FILE.exists():
         try:
@@ -886,7 +743,6 @@ def load_stats_meta():
         except Exception:
             return None
     return None
-
 
 def import_stats_arrays():
     """Идемпотентно: SET, не +=. Повтор не удваивает."""
@@ -906,14 +762,13 @@ def import_stats_arrays():
             total += len(rows)
             rows.clear()
             stats["commits"] += 1
-            print(f"\r   записано {total:,}...", end="", flush=True)
+            print(f"\r   записано {total:,}... ", end=" ", flush=True)
     if rows:
         cursor.executemany("UPDATE words SET count = ?, hits = ? WHERE id = ?", rows)
         conn.commit()
         total += len(rows)
         stats["commits"] += 1
     print(f"\r   ✅ Записано {total:,} лемм за {fmt(time.perf_counter() - t)}")
-
     # v10: НЕ удаляем — оставляем страховку от потери базы (174 МБ).
     for p in (WEIGHT_FILE, HITS_FILE):
         if p.exists():
@@ -923,7 +778,6 @@ def import_stats_arrays():
             except Exception:
                 pass
     print(f"   🛡️ Копии сохранены: {WEIGHT_FILE.name}.bak / {HITS_FILE.name}.bak")
-
 
 def load_node_filter():
     global node_ok
@@ -955,7 +809,6 @@ def load_node_filter():
         node_ok = bytearray(b"\x01") * n
         print("🔓 Фильтр по словарю выключен (все леммы)")
 
-
 # ============================================================
 # REPORT
 # ============================================================
@@ -969,7 +822,6 @@ def report():
     if (cursor.execute("SELECT MAX(hits) FROM words").fetchone()[0] or 0) == 0:
         print("❌ В words все hits=0. Сначала выполни этап 1 (scan).")
         return
-
     t0 = time.perf_counter()
     ids_desc = array('i')
     hits_desc = array('i')
@@ -981,12 +833,10 @@ def report():
         print("❌ Нет лемм с DF > 0")
         return
     print(f"Лемм с DF > 0: {n_lem:,} (загрузка {fmt(time.perf_counter() - t0)})")
-
     max_id = cursor.execute("SELECT MAX(id) FROM words").fetchone()[0] or 0
     rank = array('i', [BIG_RANK]) * (max_id + 1)
     for i, wid in enumerate(ids_desc):
         rank[wid] = i
-
     hits_asc = array('i', reversed(hits_desc))
     prefix = array('q', [0]) * (n_lem + 1)
     s = 0
@@ -994,7 +844,6 @@ def report():
         s += h
         prefix[i + 1] = s
     total_df = s
-
     print("-" * 70)
     print("Распределение DF лемм (в скольких запросах встретилась):")
     for thr in (1, 2, 3, 5, 10, 50, 100, 1000, 10000):
@@ -1002,12 +851,10 @@ def report():
         cnt = n_lem - idx
         cov = (total_df - prefix[idx]) / max(1, total_df)
         print(f"   DF >= {thr:>6}: {cnt:>10,} лемм, покрывают {cov * 100:5.1f}% вхождений")
-
     ns = sorted(set(list(REPORT_TOPN) + [n_lem]))
     ns = [x for x in ns if x <= n_lem]
     if not ns or ns[-1] != n_lem:
         ns.append(n_lem)
-
     file_size = ID_FILE.stat().st_size
     step = max(1, file_size // REPORT_CHUNKS)
     packers = _PACKERS
@@ -1018,7 +865,6 @@ def report():
     seen_records = 0
     bytes_read = 0
     br = bisect.bisect_right
-
     print("-" * 70)
     print(f"Читаю выборку ID-файла: {REPORT_CHUNKS} × {human(REPORT_CHUNK_SIZE)}...")
     with ID_FILE.open("rb") as f:
@@ -1030,7 +876,6 @@ def report():
         if magic != ID_FILE_MAGIC or version != ID_FILE_VERSION:
             print(f"❌ Формат ID-файла: {magic} v{version}")
             return
-
         for ci in range(REPORT_CHUNKS):
             start = 8 + ci * step
             if start >= file_size:
@@ -1088,30 +933,25 @@ def report():
                         half_pairs.add(key)
                 seen_records += 1
                 pos = end
-
     if not seen_records:
         print("❌ Не удалось прочитать записи")
         return
-
     total_pairs = sum(total_by_bucket)
     u_full = len(pair_max)
     u_half = len(half_pairs)
     beta = 1.0
     if u_half > 100 and u_full > u_half:
         beta = min(1.0, max(0.5, math.log(u_full / u_half) / math.log(2)))
-
     uniq_by_bucket = [0] * (len(ns) + 1)
     cnt_hist = Counter()
     for v in pair_max.values():
         uniq_by_bucket[br(ns, v >> CNT_BITS)] += 1
         c = v & CNT_MASK
         cnt_hist["1" if c == 1 else "2" if c == 2 else "3-4" if c <= 4 else "5+"] += 1
-
     frac = bytes_read / file_size
     scale = 1.0 / max(frac, 1e-12)
     total_records_est = seen_records * scale
     rc = row_cost()
-
     print(f"   Записей в выборке: {seen_records:,} ({frac * 100:.2f}% ID-файла)")
     print(f"   Пар в выборке: {total_pairs:,} | уникальных: {u_full:,} | β={beta:.3f}")
     print(f"   Всего записей в ID-файле (оценка): {big(total_records_est)}")
@@ -1135,7 +975,6 @@ def report():
         label = f"{N:,}" if N != n_lem else f"ВСЕ ({N:,})"
         print(f"{label:>14} {tp / max(1, total_pairs) * 100:6.1f}% "
               f"{up / max(1, u_full) * 100:6.1f}% {big(proj):>16} {human(proj * rc):>12}")
-
     print("-" * 70)
     print("Повторяемость пар ВНУТРИ выборки (не корпусный DF!):")
     for k in ("1", "2", "3-4", "5+"):
@@ -1151,18 +990,15 @@ def report():
           "--top-lemmas 200000 --no-prune")
     print("=" * 70)
 
-
 # ============================================================
 # Неизвестные слова
 # ============================================================
 _wmorph = None
 
-
 def _init_worker():
     global _wmorph
     import pymorphy3
     _wmorph = pymorphy3.MorphAnalyzer()
-
 
 def _lemm_chunk(words):
     global _wmorph
@@ -1178,7 +1014,6 @@ def _lemm_chunk(words):
             out.append((w, w, "неизвестно"))
     return out
 
-
 def dump_unknown():
     if not unknown_words:
         return
@@ -1187,7 +1022,6 @@ def dump_unknown():
         for w, c in top:
             f.write(f"{w}\t{c}\n")
     print(f"📝 Неизвестные слова выгружены: {len(top):,} → {UNKNOWN_FILE}")
-
 
 def lemmatize_unknown():
     global next_word_id
@@ -1220,7 +1054,6 @@ def lemmatize_unknown():
     print(f"✅ За {fmt(time.perf_counter() - t)}: форм {len(lemma_rows):,}, "
           f"новых полезных лемм {len(word_rows):,}")
 
-
 # ============================================================
 # Загрузка словаря
 # ============================================================
@@ -1234,7 +1067,7 @@ def load_minus():
                 w = line.strip().lower()
                 if w:
                     minus_words.add(w)
-        from_file = len(minus_words)
+                from_file = len(minus_words)
     added = 0
     try:
         ph = ",".join("?" * len(STOP_POS))
@@ -1246,13 +1079,11 @@ def load_minus():
         print(f"⚠️ Не удалось прочитать служебные POS: {e}")
     print(f"🚫 Минус-слов: {from_file:,} из файла + {added:,} служебных из БД = {len(minus_words):,}")
 
-
 def load_dictionaries(show_pos=True):
     global next_word_id, max_word_id
     t = time.perf_counter()
     max_word_id = cursor.execute("SELECT MAX(id) FROM words").fetchone()[0] or 0
     next_word_id = max_word_id + 1
-
     if show_pos:
         print("📊 Распределение POS в таблице words:")
         try:
@@ -1267,7 +1098,6 @@ def load_dictionaries(show_pos=True):
                 print(f"   {mark} {str(pos):<24} {cnt:>12,}")
         except Exception as e:
             print(f"   (не удалось: {e})")
-
     ph = ",".join("?" * len(ALLOWED_POS))
     kept = skipped = blocked_lemmas = 0
     for wid, lemma in cursor.execute(f"SELECT id, word FROM words WHERE pos IN ({ph})", ALLOWED_POS):
@@ -1286,7 +1116,6 @@ def load_dictionaries(show_pos=True):
     stats["dict_lemmas"] = kept
     print(f"📖 Разрешённых лемм: {kept:,} (коротких/не-кириллица {skipped:,}, "
           f"чёрный список {blocked_lemmas:,}) за {fmt(time.perf_counter() - t)}")
-
     t = time.perf_counter()
     forms = zeros = blocked_forms = 0
     read_cur = conn.cursor()
@@ -1313,7 +1142,6 @@ def load_dictionaries(show_pos=True):
         raw_to_id[w] = 0
     print(f"⚡ Словарь в памяти: {len(raw_to_id):,} ключей{rss()}")
 
-
 # ============================================================
 # ЭТАП 1: скан
 # ============================================================
@@ -1325,7 +1153,6 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
     stats["scan_start"] = time.perf_counter()
     total_size = INPUT_FILE.stat().st_size
     print(f"📄 Файл: {human(total_size)}")
-
     if resume_offset > 0 and ID_FILE.exists() and resume_id_offset >= 8:
         meta = load_stats_meta()
         if meta and meta.get("byte_offset", 0) <= resume_offset:
@@ -1353,7 +1180,6 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
             if p.exists():
                 p.unlink()
         print("🆕 Новый ID-файл")
-
     process = make_processor(MIN_QUERY_FREQ, MAX_WORDS_PER_QUERY)
     buffer = bytearray()
     extend = buffer.extend
@@ -1361,7 +1187,6 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
     count_pack = ID_STRUCT_COUNT.pack
     weights = word_weight
     hits = word_hits
-
     records = resume_records
     offset = resume_offset
     lines = resume_lines
@@ -1407,7 +1232,6 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
                     continue
                 block = data[:cut + 1]
                 tail = data[cut + 1:]
-
                 for line in block.decode("utf-8", errors="ignore").split("\n"):
                     if not line:
                         continue
@@ -1428,11 +1252,9 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
                     else:
                         extend(struct.pack(f"<{k}I", *ids, freq))
                     records += 1
-
                 offset += len(block)
                 if len(buffer) >= ID_FILE_BUFFER_SIZE:
                     write_buffer()
-
                 now = time.perf_counter()
                 if now - last_ckpt >= CHECKPOINT_SEC:
                     checkpoint()
@@ -1446,7 +1268,6 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
                     status_line(f"[{fmt(run)}] {offset / total_size * 100:.1f}% | "
                                 f"{short(speed)} стр/с | ост {fmt(eta)[:5]} | "
                                 f"стр {short(done_lines)} | зап {short(records)}{rss_s()}")
-
         checkpoint()
         import_stats_arrays()
     finally:
@@ -1457,23 +1278,19 @@ def stage_scan(resume_offset=0, resume_id_offset=0, resume_records=0, resume_lin
         stats["lines_kept"] = kept
         stats["records"] = records
         stats["scan_end"] = time.perf_counter()
-
     if interrupted:
         print(f"\n⏸️ Прервано на байте {offset:,}. Прогресс сохранён.")
         return False
-
     print(f"\n✅ Этап 1 за {fmt(stats['scan_end'] - stats['scan_start'])}")
     print(f"   Строк: {lines:,} | прошло: {kept:,} ({kept / max(1, lines) * 100:.1f}%)")
     print(f"   Записей ID: {records:,} | размер: {human(ID_FILE.stat().st_size)}")
     print(f"   Токенов: взято {stats['tokens_kept']:,}, "
           f"неизвестно {stats['tokens_unknown']:,}, отфильтровано {stats['tokens_filtered']:,}")
-
     progress["stage"] = "links"
     progress["id_file_offset"] = 8
     progress["links_records"] = 0
     save_progress(update_config=True)
     return True
-
 
 # ============================================================
 # ЭТАП 2: связи
@@ -1496,7 +1313,6 @@ def flush_links():
     stats["commits"] += 1
     print(f"\n💾 Связей сброшено: {n:,} за {time.perf_counter() - t:.1f} сек{rss()}")
 
-
 def stage_links(resume_offset=8, resume_records=0):
     global interrupted
     print("\n" + "=" * 70)
@@ -1506,19 +1322,16 @@ def stage_links(resume_offset=8, resume_records=0):
     if not ID_FILE.exists():
         print("❌ ID-файл не найден")
         return False
-
     load_node_filter()
     file_size = ID_FILE.stat().st_size
     print(f"📄 ID-файл: {human(file_size)}")
     if not check_disk(max(2 * 1024 ** 3, file_size * 0.6), "таблица links"):
         return False
-
     buf = links_buffer
     ok = node_ok
     n_ok = len(ok)
     packers = _PACKERS
     unpack_from = struct.unpack_from
-
     records = resume_records
     pairs_total = pairs_kept = 0
     base = 8
@@ -1526,7 +1339,6 @@ def stage_links(resume_offset=8, resume_records=0):
     last_status = 0.0
     t_start = time.perf_counter()
     last_ckpt = t_start
-
     with ID_FILE.open("rb") as f:
         header = f.read(8)
         if len(header) < 8:
@@ -1541,7 +1353,6 @@ def stage_links(resume_offset=8, resume_records=0):
             if base > 8:
                 print(f"▶️ Продолжение с байта {base:,}, записей {records:,}")
         f.seek(base)
-
         while not interrupted:
             chunk = f.read(READ_CHUNK)
             if not chunk:
@@ -1550,7 +1361,6 @@ def stage_links(resume_offset=8, resume_records=0):
             n = len(data)
             pos = 0
             since = 0
-
             while True:
                 if pos + 2 > n:
                     break
@@ -1565,7 +1375,6 @@ def stage_links(resume_offset=8, resume_records=0):
                     vals = unpack_from(f"<{k}I", data, pos + 2)
                 freq = vals[-1]
                 inc = (freq << HIT_BITS) + 1
-
                 if nw == 2:
                     a = vals[0]
                     b = vals[1]
@@ -1583,11 +1392,9 @@ def stage_links(resume_offset=8, resume_records=0):
                         for a, b in combinations(ids, 2):
                             buf[(a << 32) | b] += inc
                         pairs_kept += m * (m - 1) // 2
-
                 records += 1
                 pos = end
                 since += 1
-
                 if since >= 50_000:
                     since = 0
                     now = time.perf_counter()
@@ -1610,10 +1417,8 @@ def stage_links(resume_offset=8, resume_records=0):
                               f"ETA: {fmt(eta)}{rss()}   ", end="", flush=True)
                     if interrupted:
                         break
-
             base += pos
             tail = data[pos:]
-
     flush_links()
     progress["stage"] = "links"
     progress["id_file_offset"] = base
@@ -1622,17 +1427,14 @@ def stage_links(resume_offset=8, resume_records=0):
     stats["pairs_total"] = pairs_total
     stats["pairs_kept"] = pairs_kept
     stats["links_end"] = time.perf_counter()
-
     if interrupted:
         print(f"\n⏸️ Прервано на записи {records:,}. Прогресс сохранён.")
         return False
-
     print(f"\n✅ Этап 2 за {fmt(stats['links_end'] - stats['links_start'])}")
     print(f"   Записей: {records:,} | пар всего: {pairs_total:,} | "
           f"после фильтра словаря: {pairs_kept:,}")
     print(f"   Размер базы: {human(DB_FILE.stat().st_size)}")
     return True
-
 
 # ============================================================
 # Гистограмма DF пар / ЭТАП 3
@@ -1661,7 +1463,6 @@ def df_histogram():
     print("   ⚠️ Prune необратим: понижение порога потребует пересчёта связей (--links-restart).")
     return total
 
-
 def stage_prune():
     print("\n" + "=" * 70)
     print(f"✂️ ЭТАП 3: отсечение (DF пары >= {MIN_PAIR_HITS}, вес >= {MIN_PAIR_COUNT})")
@@ -1675,7 +1476,6 @@ def stage_prune():
     conn.commit()
     after = cursor.execute("SELECT COUNT(*) FROM links").fetchone()[0]
     print(f"   Строк после: {after:,} (убрано {before - after:,}) за {fmt(time.perf_counter() - t)}")
-
     if TOP_EDGES_PER_NODE > 0:
         print(f"   Топ-{TOP_EDGES_PER_NODE} рёбер на узел (по word1_id)...")
         t = time.perf_counter()
@@ -1693,7 +1493,6 @@ def stage_prune():
         conn.commit()
         after = cursor.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         print(f"   Осталось: {after:,} за {fmt(time.perf_counter() - t)}")
-
     nodes = cursor.execute(
         "SELECT COUNT(*) FROM (SELECT word1_id FROM links UNION SELECT word2_id FROM links)"
     ).fetchone()[0]
@@ -1707,7 +1506,6 @@ def stage_prune():
         conn.execute("VACUUM")
         print(f"   Размер после VACUUM: {human(DB_FILE.stat().st_size)}")
 
-
 # ============================================================
 # Статус / итог
 # ============================================================
@@ -1717,9 +1515,9 @@ def print_status():
     print("=" * 70)
     p = load_progress()
     if p:
-        print(f"   Прогресс: стадия={p.get('stage')} | версия={p.get('version')} "
+        print(f"   Прогресс: стадия={p.get('stage')} | версия={p.get('version')}  "
               f"| {p.get('timestamp')}")
-        print(f"   scan: байт {p.get('byte_offset', 0):,} | записей {p.get('records_written', 0):,} "
+        print(f"   scan: байт {p.get('byte_offset', 0):,} | записей {p.get('records_written', 0):,}  "
               f"| строк {p.get('lines', 0):,}")
         print(f"   links: байт ID {p.get('id_file_offset', 0):,} | записей {p.get('links_records', 0):,}")
         print(f"   словарь: {p.get('links_config')}")
@@ -1732,12 +1530,11 @@ def print_status():
         total = cursor.execute("SELECT COUNT(*) FROM words").fetchone()[0]
         withdf = cursor.execute("SELECT COUNT(*) FROM words WHERE hits > 0").fetchone()[0]
         print(f"   words: {total:,} всего, {withdf:,} с DF > 0")
-        print(f"   links: {'WITHOUT ROWID' if links_without_rowid() else 'rowid'}, "
+        print(f"   links: {'WITHOUT ROWID' if links_without_rowid() else 'rowid'},  "
               f"{'пуста' if cursor.execute('SELECT 1 FROM links LIMIT 1').fetchone() is None else 'есть данные'}")
     except Exception as e:
         print(f"   (БД: {e})")
     print("=" * 70)
-
 
 def print_stats():
     total = time.perf_counter() - stats["start"]
@@ -1751,7 +1548,7 @@ def print_stats():
     if stats["links_end"]:
         print(f"  Этап 2 (связи):     {fmt(stats['links_end'] - stats['links_start'])}")
     print("-" * 70)
-    print(f"Формат: разделитель={LINE_DELIM!r}, колонок={N_COLS}, "
+    print(f"Формат: разделитель={LINE_DELIM!r}, колонок={N_COLS},  "
           f"запрос=кол.{QUERY_COL + 1}, вес=кол.{N_COLS if FREQ_COL == -1 else FREQ_COL + 1}")
     if stats["dict_lemmas"]:
         print(f"Словарь: лемм {stats['dict_lemmas']:,}, форм {stats['dict_forms']:,}")
@@ -1771,7 +1568,6 @@ def print_stats():
             print(f"Скорость скана:       {stats['lines'] / sec:,.0f} строк/сек")
     print("=" * 70)
 
-
 def signal_handler(sig, frame):
     global interrupted
     if interrupted:
@@ -1779,7 +1575,6 @@ def signal_handler(sig, frame):
         sys.exit(1)
     interrupted = True
     print("\n⏸️ Прерывание: дохожу до конца блока и сохраняю чекпоинт...")
-
 
 # ============================================================
 # main
@@ -1823,7 +1618,6 @@ def parse_args():
     p.add_argument("--quiet", action="store_true", help="минимум вывода")
     return p.parse_args()
 
-
 def main():
     global interrupted, MIN_QUERY_FREQ, MIN_PAIR_HITS, MIN_PAIR_COUNT, TOP_LEMMAS
     global MIN_LEMMA_HITS, MAX_WORDS_PER_QUERY, TOP_EDGES_PER_NODE, ALLOWED_POS
@@ -1831,7 +1625,6 @@ def main():
     global MARK_FILTERED_FORMS, LINE_DELIM, QUERY_COL, FREQ_COL
     global CACHE_GB, LINKS_BUFFER_LIMIT, REPORT_CHUNKS, REPORT_CHUNK_SIZE, MAKE_HITS_INDEX
     global max_word_id, PROGRESS_EVERY, QUIET
-
     a = parse_args()
     MIN_QUERY_FREQ = a.min_freq
     MIN_PAIR_HITS = a.min_pair_hits
@@ -1857,10 +1650,8 @@ def main():
     FREQ_COL = -1 if str(a.freq_col).lower() == "last" else max(0, int(a.freq_col) - 1)
     if a.all_pos:
         ALLOWED_POS = tuple(POS_RU.values()) + ("неизвестно",)
-
     signal.signal(signal.SIGINT, signal_handler)
     stats["start"] = time.perf_counter()
-
     print("=" * 70)
     print("🚀 Граф связей v10")
     print(f"   вес>={MIN_QUERY_FREQ} | DF леммы>={MIN_LEMMA_HITS} | топ-лемм={TOP_LEMMAS or 'ВСЕ'} | "
@@ -1870,10 +1661,8 @@ def main():
               f"буфер {LINKS_BUFFER_LIMIT:,} | кэш {CACHE_GB:.1f} ГБ")
     print(f"   Прогресс: каждые {PROGRESS_EVERY:.0f} сек, режим {'терминал' if IS_TTY else 'лог'}")
     print("=" * 70)
-
     light = a.report or a.status or a.df_hist or a.prune_only or a.links_only
     readonly = a.dry_run or a.report or a.status or a.df_hist
-
     if not light and not INPUT_FILE.exists():
         print(f"❌ Нет файла: {INPUT_FILE}")
         return
@@ -1882,11 +1671,9 @@ def main():
         if a.delim is not None:
             LINE_DELIM = "\t" if a.delim.lower() in ("tab", "\\t", "t") else a.delim
             print(f"   ⚙️ Разделитель задан вручную: {LINE_DELIM!r}")
-
     connect_db(readonly=readonly)
     if not readonly:
         init_schema()
-
     if a.status:
         print_status()
         disconnect_db()
@@ -1895,15 +1682,12 @@ def main():
         df_histogram()
         disconnect_db()
         return
-
     saved = load_progress()
     if saved and saved.get("config"):
         progress["config"] = saved["config"]
-
     stage = "scan"
     off = recs = lrecs = rlines = 0
     lidoff = 8
-
     if a.prune_only:
         stage = "prune"
     elif a.links_only:
@@ -1950,7 +1734,6 @@ def main():
             print("⚠️ Прогресса нет, но данные есть — пересчёт фактов")
         reset_facts()
         clear_progress()
-
     need_dict = a.dry_run or stage == "scan"
     if need_dict:
         load_minus()
@@ -1958,10 +1741,8 @@ def main():
     else:
         max_word_id = cursor.execute("SELECT MAX(id) FROM words").fetchone()[0] or 0
         print("⚡ Лёгкий режим: словарь словоформ не грузится (этап работает по ID)")
-
     stats["init_end"] = time.perf_counter()
     print(f"⏱️ Инициализация: {fmt(stats['init_end'] - stats['start'])}")
-
     if a.dry_run:
         dry_run()
         disconnect_db()
@@ -1970,66 +1751,60 @@ def main():
         report()
         disconnect_db()
         return
-
     if stage == "scan":
         init_stats_arrays(load_existing=(off > 0))
         if not check_disk(max(5 * 1024 ** 3, INPUT_FILE.stat().st_size * 0.25), "ID-файл"):
             disconnect_db()
             return
-
-    try:
-        if stage == "scan":
-            if not stage_scan(off, lidoff, recs, rlines):
-                return
-            stage = "links"
-            lidoff, lrecs = 8, 0
-            dump_unknown()
-            if LEMMATIZE_UNKNOWN:
-                lemmatize_unknown()
-            raw_to_id.clear()
-            allowed_lemmas.clear()
-            print("\n💡 Теперь подбери словарь: python scripts/graph_builder.py --report")
-            if a.scan_only:
-                print("⏹️ --scan-only: останавливаюсь после этапа 1.")
-                return
-
-        if stage == "links":
-            if not (TOP_LEMMAS > 0 or MIN_LEMMA_HITS > 0 or a.all_lemmas):
-                print("\n" + "⛔" * 35)
-                print("⛔ Этап 2 БЕЗ ограничения словаря отключён в v10.")
-                print("   По всем леммам это миллиарды пар, десятки часов и база на 50-100 ГБ.")
-                print("   Порядок:")
-                print("     1) python scripts/graph_builder.py --report")
-                print("     2) python scripts/graph_builder.py --links-only --links-restart "
-                      "--top-lemmas 200000 --no-prune")
-                print("   Если действительно нужен полный граф — добавь --all-lemmas")
-                print("⛔" * 35)
-                progress["stage"] = "links"
+        try:
+            if stage == "scan":
+                if not stage_scan(off, lidoff, recs, rlines):
+                    return
+                stage = "links"
+                lidoff, lrecs = 8, 0
+                dump_unknown()
+                if LEMMATIZE_UNKNOWN:
+                    lemmatize_unknown()
+                raw_to_id.clear()
+                allowed_lemmas.clear()
+                print("\n💡 Теперь подбери словарь: python scripts/graph_builder.py --report")
+                if a.scan_only:
+                    print("⏹️ --scan-only: останавливаюсь после этапа 1.")
+                    return
+            if stage == "links":
+                if not (TOP_LEMMAS > 0 or MIN_LEMMA_HITS > 0 or a.all_lemmas):
+                    print("\n" + "⛔" * 35)
+                    print("⛔ Этап 2 БЕЗ ограничения словаря отключён в v10.")
+                    print("   По всем леммам это миллиарды пар, десятки часов и база на 50-100 ГБ.")
+                    print("   Порядок:")
+                    print("     1) python scripts/graph_builder.py --report")
+                    print("     2) python scripts/graph_builder.py --links-only --links-restart "
+                          "--top-lemmas 200000 --no-prune")
+                    print("   Если действительно нужен полный граф — добавь --all-lemmas")
+                    print("⛔" * 35)
+                    progress["stage"] = "links"
+                    save_progress()
+                    return
+                if not stage_links(lidoff, lrecs):
+                    return
+                stage = "prune"
+                progress["stage"] = "prune"
                 save_progress()
-                return
-            if not stage_links(lidoff, lrecs):
-                return
-            stage = "prune"
-            progress["stage"] = "prune"
+                if a.no_prune:
+                    print("\n⏹️ --no-prune: связи построены, отсечение пропущено.")
+                    print("   Далее: --df-hist, затем --prune-only --min-pair-hits N")
+                    return
+            if stage == "prune":
+                stage_prune()
+            progress["stage"] = "done"
             save_progress()
-            if a.no_prune:
-                print("\n⏹️ --no-prune: связи построены, отсечение пропущено.")
-                print("   Далее: --df-hist, затем --prune-only --min-pair-hits N")
-                return
-
-        if stage == "prune":
-            stage_prune()
-
-        progress["stage"] = "done"
-        save_progress()
-        clear_progress()
-        if ID_FILE.exists():
-            print(f"\n💾 ID-файл сохранён ({human(ID_FILE.stat().st_size)}): {ID_FILE}")
-            print("   Меняешь словарь/пороги? --report и --links-only, исходник перечитывать не надо.")
-    finally:
-        print_stats()
-        disconnect_db()
-
+            clear_progress()
+            if ID_FILE.exists():
+                print(f"\n💾 ID-файл сохранён ({human(ID_FILE.stat().st_size)}): {ID_FILE}")
+                print("   Меняешь словарь/пороги? --report и --links-only, исходник перечитывать не надо.")
+        finally:
+            print_stats()
+            disconnect_db()
 
 if __name__ == "__main__":
     main()
