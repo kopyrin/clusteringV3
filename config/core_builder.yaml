@@ -1,0 +1,193 @@
+core_builder:
+  max_core_size: 50
+  min_connections: 2
+  max_connections: null
+  min_link_weight: 5
+  min_word_freq: 10
+  max_word_freq: null
+  collect_all: true
+  checkpoint:
+    enabled: false
+    interval: 10
+  output:
+    format: csv
+    include_all: false
+    show_marks: true
+  mark_dicts:
+    enabled: true
+    use_all: true
+    files: []
+  mark_groups:
+    enabled: true
+    groups:
+      служебные_части_речи:
+        Предлоги: true
+        Союзы: true
+        Частицы: true
+        Междометия: true
+        Предикативы: true
+      иностранные_слова:
+        Английские слова: true
+        Английские служебные слова: true
+      части_речи:
+        Существительные: false
+        Прилагательное: false
+        Краткое прилагательное: false
+        Сравнительная степень: false
+        Глагол: false
+        Инфинитив: false
+        Причастие: false
+        Краткое причастие: false
+        Деепричастие: false
+        Наречия: false
+        Местоимения: false
+        Числительные: false
+      именованные_объекты:
+        Бренды: true
+        Компании: true
+        Организации: true
+        Производители: true
+        Интернет-сервисы: true
+        Программы: true
+        Мобильные приложения: true
+        Компьютерные игры: true
+        Доменные зоны: true
+        Маркетплейсы: true
+        Социальные сети: true
+        Поисковые системы: true
+        Валюты: true
+        Криптовалюты: true
+        Банки: true
+        Операторы связи: true
+        Автомобильные бренды: true
+        Модели: true
+        Видео и стриминг: true
+        Фильмы и сериалы: true
+        Персонажи: true
+        Географические объекты: true
+        Города: true
+        Отели: true
+      предметные_области:
+        Мебель: false
+        Посуда: false
+        Текстиль: false
+        Строительные материалы: false
+        Продукты питания: false
+        Игрушки: false
+        Косметика: false
+        Еда: false
+        Топливо: false
+        Напитки: false
+        Автомобили: false
+        Электроника: false
+        Сантехника: false
+        Инструменты: false
+        Одежда: false
+        Бытовая техника и оборудование: false
+        Промышленное и техническое оборудование: false
+        Торговое оборудование: false
+        Комплектующие: false
+        Крепеж: false
+        Помещения: false
+        Освещение: false
+        Игры: false
+        Развлечения: false
+        Лекарства: false
+      свойства_товара:
+        Характеристики: false
+        Качество: false
+        Цена: false
+        Эконом-сегмент: false
+        Размеры: false
+        Форма: false
+        Вместимость: false
+        Вес: false
+        Объем: false
+        Напряжение: false
+        Материалы: false
+        Свойства материалов: false
+        Ткани: false
+        Покрытие и отделка: false
+        Конструкция: false
+        Назначение: false
+        Цвета: false
+        Стиль: false
+        Артикулы: false
+        Виды товаров: false
+        Места продаж: false
+        Услуги: false
+        Купоны и скидки: false
+      тематики:
+        IT: false
+        Интернет: false
+        Технологии: false
+        Искусственный интеллект: false
+        Форматы файлов: false
+        Наука: false
+        Образование: false
+        Химия: false
+        Общество: false
+        Политика: false
+        Законодательство: false
+        Безопасность: false
+        История: false
+        Религия: false
+        Финансы: false
+        Экономика: false
+        Бизнес: false
+        Страхование: false
+        Микрозаймы: false
+        Авиация: false
+        Транспорт: false
+        Строительство и ремонт: false
+        Военное дело: false
+        Сельское хозяйство: false
+        Медицина: false
+        Растения: false
+        Животные: false
+        Музыка: false
+        Кино: false
+        Искусство: false
+        Литература: false
+        Спорт: false
+        Туризм: false
+        Медиа: false
+        Документы: false
+        Мероприятия: false
+        Сленг: false
+        Термин: false
+        Контент 18+: true
+        Проблемы: false
+      человек:
+        Люди: false
+        Профессии: false
+        Целевая аудитория: false
+        Возраст: false
+        Пол: false
+        Доход: false
+        Семейное положение: false
+        Интересы: false
+        Хобби: false
+        Образ жизни: false
+        Ценности: false
+        Потребности: false
+        Мотивация: false
+        Желание и цели: false
+        Психология и саморазвитие: false
+        Боли: false
+        Возражения: false
+        Страхи: false
+        Эмоции: false
+        Привычки: false
+      прочее:
+        Лингвистика: false
+        Предметные области: false
+        Тематики: false
+        Человек: false
+        Именованные объекты: false
+        Свойства товара: false
+        Действия: false
+        Декоративные элементы: false
+        DIY и самостоятельное изготовление: false
+        Сервисы: false
+  max_link_weight: null

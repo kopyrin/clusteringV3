@@ -1,0 +1,29 @@
+.venv/
+__pycache__/
+.idea/
+.env
+data/output/semantics.db
+data/output/*.txt
+data/output/*.json
+data/output/*.pkl
+# Игнорировать исходную бинарную базу данных
+*.db
+data/output/*.db
+output/*.db
+
+# Игнорировать временные файлы экспорта
+semantics_dump.sql
+
+# РАЗРЕШИТЬ загрузку только сжатого дампа (если он явно добавлен)
+# Но мы просто не будем добавлять *.zip в ignore, или сделаем так:
+!semantics_dump.zip
+config/core_builder.yaml.bak
+data/output/semantics.db.bak_before_cleanup
+float
+int
+list
+list_groups.py
+Path
+str
+0
+bool
