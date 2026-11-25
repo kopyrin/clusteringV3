@@ -22,3 +22,44 @@
 git clone https://github.com/kopyrin/clusteringV3.git
 cd clusteringV3
 python launcher.py
+```
+
+Лаунчер автоматически создаст виртуальное окружение и установит зависимости.
+
+##  Быстрый старт
+
+- **Инициализация проекта** — создаст БД и загрузит seed-данные
+- **Положите файлы** в data/input/:
+```
+keywords.txt — поисковые запросы с частотами
+start_words.txt — стартовые слова для сборки ядра
+```
+- **Внесите данные в базу** — из keywords.txt в semantics.db
+- **Соберите ядро** — все параметры, пресеты, режимы запуска
+- **(Опционально) Классификация (ИИ)** — группировка слов через LLM
+
+## Структура проекта
+```
+clusteringV3/
+├── launcher.py              # Главный лаунчер
+├── requirements.txt
+├── .env.example             # Шаблон для API-ключей
+├── scripts/
+│   ├── init_project.py      # Инициализация БД
+│   ├── graph_builder.py     # Построение графа из keywords.txt
+│   ├── core_builder.py      # Сборка семантического ядра
+│   ├── filter_keywords.py   # Сжатие keywords.txt
+│   ├── hypothesis_finder.py # Поиск гипотез связей
+│   ├── ai_classifier.py     # Фасетная классификация (ИИ)
+│   ├── export_db.py         # Экспорт БД в CSV + архивы
+│   └── cleanup_orphan_words.py  # Очистка слов без связей
+├── config/                  # Конфигурации (создаются автоматически)
+├── data/
+│   ├── input/               # Входные файлы
+│   ├── output/              # Результаты
+│   └── seed/                # Seed-данные для переноса
+└── dict/                    # Словари для меток
+```
+## Лицензия
+
+МИТ
