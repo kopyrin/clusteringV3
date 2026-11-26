@@ -3,6 +3,10 @@ __pycache__/
 .idea/
 .env
 data/output/semantics.db
+data/output/core_words_checkpoint.json
+data/output/semantics.db.bak_before_cleanup
+data/output/semantics.db-shm
+sdata/output/emantics.db-wal
 data/output/*.txt
 data/output/*.json
 data/output/*.pkl
@@ -18,7 +22,6 @@ semantics_dump.sql
 # Но мы просто не будем добавлять *.zip в ignore, или сделаем так:
 !semantics_dump.zip
 config/core_builder.yaml.bak
-data/output/semantics.db.bak_before_cleanup
 float
 int
 list
